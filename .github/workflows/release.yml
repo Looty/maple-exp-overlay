@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag like v0.2.1 (it must match the version in Cargo.toml) and this builds the exe, zips it with its licence files,
+# and publishes a GitHub release with a SHA-256 checksum.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}=.
+        --remap-path-prefix=C:\Users\runneradmin\.cargo=~/.cargo
+        --remap-path-prefix=C:\Users\runneradmin\.rustup=~/.rustup
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+            exit 1
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "maple-exp-overlay-$tag-windows-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item target/release/maple-exp-overlay.exe, README.md, LICENSE, NOTICE -Destination $name
+          Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "ASSET=$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          generate_release_notes: true

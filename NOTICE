@@ -1,0 +1,36 @@
+Maple EXP Overlay: third-party notices
+
+This is an unofficial, fan-made tool. It is not made, endorsed or supported by Nexon and is not affiliated with Nexon.
+MapleStory is a trademark of Nexon.
+
+------------------------------------------------------------------------------
+Maple Classic Exp Overlay (https://github.com/beanguri/Maple-Classic-Exp-Overlay)
+
+The digit templates in src/digits.bin (the shapes the EXP bar's digits are matched against) were exported from that
+project's assets/digits.npz, and the approach of reading the bar by shape comes from it.
+
+MIT License
+
+Copyright (c) 2026 beanguri
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------------
+Slint (https://slint.dev), used for the settings window
+
+Slint is available under the GNU GPLv3, the Slint Royalty-Free Desktop, Mobile and Web Applications License, or a
+commercial licence. Check which of these you distribute this app under; the royalty-free licence asks for the
+"Made with Slint" attribution, which the About tab shows.
+
+Other Rust crates (serde, serde_json, windows, windows-sys) are used under their MIT / Apache-2.0 licences.

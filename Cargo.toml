@@ -1,0 +1,76 @@
+[package]
+name = "maple-exp-overlay"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.92" # slint 1.18
+description = "Tiny EXP/hr overlay for MapleStory Classic World: Rust, no OCR engine, near-zero CPU"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "maple_exp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "maple-exp-overlay"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "allow" # the Win32 modules are one big unsafe API surface
+
+[lints.clippy]
+dbg_macro = "warn"
+unimplemented = "warn"
+# The image code indexes pixel buffers in lockstep and walks them in fixed-size chunks; the suggested rewrites are no clearer.
+needless_range_loop = "allow"
+chunks_exact_to_as_chunks = "allow"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# The overlay is plain Win32 + GDI. Slint is used only for the settings window, which runs as its own short-lived
+# process (`--settings`), so the overlay itself never pays for it.
+slint = { version = "1.18", default-features = false, features = ["std", "backend-default", "renderer-software", "compat-1-2"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# WinRT, for Windows Graphics Capture only (capturing the game window itself)
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
+
+[build-dependencies]
+slint-build = "1.18"
+winresource = "0.1.34"
+
+[dev-dependencies]
+png = "0.17"
+
+[profile.release]
+opt-level = "s" # size over speed; nothing here is CPU bound
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
