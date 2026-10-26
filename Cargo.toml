@@ -1,6 +1,6 @@
 [package]
 name = "maple-exp-overlay"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.92" # slint 1.18
 description = "Tiny EXP/hr overlay for MapleStory Classic World: Rust, no OCR engine, near-zero CPU"
