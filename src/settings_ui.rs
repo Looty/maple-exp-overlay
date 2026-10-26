@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 slint::include_modules!();
 
-const POLL_SECS: [i32; 3] = [1, 2, 5];
+const POLL_MS: [i32; 4] = [250, 500, 750, 1000];
 const TITLE: &str = "Maple EXP Overlay - Settings";
 
 type Shared = Rc<RefCell<Settings>>;
@@ -76,7 +76,12 @@ fn to_cfg(s: &Settings) -> Cfg {
             CaptureMode::Screen => 0,
             CaptureMode::Window => 1,
         },
-        poll_index: POLL_SECS.iter().position(|&p| p == s.poll_secs).unwrap_or(0) as i32,
+        // (a hand-edited value in between shows as the nearest choice)
+        poll_index: (0..POLL_MS.len()).min_by_key(|&i| (POLL_MS[i] - s.poll_ms).abs()).unwrap_or(0) as i32,
+        anim_count: s.anim_count,
+        anim_pop: s.anim_pop,
+        anim_snail: s.anim_snail,
+        anim_rainbow: s.anim_rainbow,
         autostart: system::autostart_enabled(),
         start_hidden: s.start_hidden,
     }
@@ -100,7 +105,11 @@ fn from_cfg(s: &mut Settings, c: &Cfg) {
     s.idle_secs = c.idle_secs;
     s.window_min = c.window_min;
     s.capture = if c.capture_index == 1 { CaptureMode::Window } else { CaptureMode::Screen };
-    s.poll_secs = POLL_SECS[(c.poll_index.max(0) as usize).min(POLL_SECS.len() - 1)];
+    s.poll_ms = POLL_MS[(c.poll_index.max(0) as usize).min(POLL_MS.len() - 1)];
+    s.anim_count = c.anim_count;
+    s.anim_pop = c.anim_pop;
+    s.anim_snail = c.anim_snail;
+    s.anim_rainbow = c.anim_rainbow;
     s.start_hidden = c.start_hidden;
 }
 

@@ -68,6 +68,11 @@ winresource = "0.1.34"
 [dev-dependencies]
 png = "0.17"
 
+# Debug builds of this crate (the digit matching is heavy maths) run about 100x slower unoptimised: a read blocks the
+# overlay for seconds, which also delays every effect. Optimising just this package keeps debugging usable.
+[profile.dev.package.maple-exp-overlay]
+opt-level = 2
+
 [profile.release]
 opt-level = "s" # size over speed; nothing here is CPU bound
 lto = true

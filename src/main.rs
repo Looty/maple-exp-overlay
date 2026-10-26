@@ -16,6 +16,8 @@ fn main() {
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]
+mod log;
+#[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
 mod selector;

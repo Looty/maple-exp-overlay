@@ -3,11 +3,14 @@
 //! whenever the settings window saves.
 
 use crate::capture::{self, game_rect, grab, hash, save_bmp};
+use crate::log::dlog;
 use crate::system::{self, wide};
+use maple_exp::anim::{self, Eased, Pop, Walkers};
 use maple_exp::config::{self, parse_hex, CaptureMode, Settings, APP_NAME};
 use maple_exp::reader::{diagnose, find_and_read, Reading, Templates};
 use maple_exp::text::commas;
 use maple_exp::tracker::{Stats, Tracker};
+
 use std::cell::RefCell;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
@@ -21,6 +24,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_LOOK: usize = 1;
 const TIMER_CFG: usize = 2;
+const TIMER_ANIM: usize = 3; // runs only while an effect is showing
+const ANIM_MS: u32 = 33; // frame time while something is moving fast
+const RAINBOW_MS: u32 = 100; // ...and while only the rainbow text is shimmering, which is slower
+const POP_CLASS: &str = "MapleExpOverlayPop";
+const WALKER_CLASS: &str = "MapleExpOverlayWalker";
+const POP_KEY: u32 = 0x00FF00FF; // the pop-up window's see-through colour (magenta)
 const SLOW_MS: u32 = 3000; // while no area is selected: just waiting for one
 const IDLE_MS: u32 = 5000; // while MapleStory isn't running
 const LOST_AFTER: u32 = 5; // failed looks in a row before saying the bar can't be read
@@ -30,11 +39,35 @@ const ID_SETTINGS: usize = 1;
 const ID_RESET: usize = 2;
 const ID_TOGGLE: usize = 3;
 const ID_QUIT: usize = 4;
+const ID_PREVIEW: usize = 5;
 pub const CLASS: &str = "MapleExpOverlay";
 
 /// A text colour as an item's tone number (see `config::tone_hex`).
 type Tone = u8;
 const TONE_STATUS: Tone = 2;
+const TONE_RAINBOW: Tone = 250; // not a theme or palette colour: the letters are drawn in a rainbow gradient
+
+/// The effects' state (see `maple_exp::anim`). Does nothing unless one of the `Settings::anim_*` switches is on.
+struct Fx {
+    /// the animation timer is running, at `ms`
+    on: bool,
+    ms: u32,
+    /// the level is close (see `near_level_up`): the rainbow text and pop-up shimmer
+    near: bool,
+    /// the crawling snails (one per EXP gain) and the window they are drawn in
+    walkers: Walkers,
+    walker_hwnd: HWND,
+    prev: Option<Reading>,
+    pop: Pop,
+    /// the pop-up counts percent (the bar shows no EXP number) rather than EXP
+    pop_pct: bool,
+    pop_text: String,
+    pop_hwnd: HWND,
+    pop_font: HFONT,
+    pop_size: (i32, i32),
+    /// rolling values: EXP now, percent, gained EXP, gained percent
+    eased: [Eased; 4],
+}
 
 struct App {
     s: Settings,
@@ -46,6 +79,8 @@ struct App {
     tracker: Tracker,
     start: Instant,
     last_hash: u64,
+    /// The period the look timer is set to now.
+    timer_ms: u32,
     last_reading: Option<Reading>,
     /// what the last failed (or requested) look found, in words ("short|long")
     note: String,
@@ -63,6 +98,9 @@ struct App {
     auto_hidden: bool,
     tray_on: bool,
     size: (i32, i32),
+    /// how far up the box sits to make room for the problem or pause message row (0 without one)
+    status_shift: i32,
+    fx: Fx,
 }
 
 thread_local!(static APP: RefCell<Option<App>> = const { RefCell::new(None) });
@@ -110,6 +148,20 @@ fn clock(secs: f64) -> String {
 
 type Row = Vec<(String, Tone)>;
 
+/// The next level is less than `anim_rainbow_min` minutes away (and farming hasn't paused).
+fn near_level_up(s: &Settings, st: &Stats) -> bool {
+    s.anim_rainbow && !st.paused && eta_minutes(s, st).is_some_and(|m| m < s.anim_rainbow_min as f64)
+}
+
+/// Minutes to the next level, by the rate the settings say to use.
+fn eta_minutes(s: &Settings, st: &Stats) -> Option<f64> {
+    if s.eta_recent {
+        st.eta_recent_min.or(st.eta_min)
+    } else {
+        st.eta_min
+    }
+}
+
 /// The text of one item right now; None when there is nothing to say yet (it is then left out).
 fn item_text(id: &str, s: &Settings, st: &Stats, problem: bool) -> Option<String> {
     let num = |n: f64| if s.short_numbers { short(n) } else { commas(n.round() as u64) };
@@ -122,10 +174,7 @@ fn item_text(id: &str, s: &Settings, st: &Stats, problem: bool) -> Option<String
         }),
         "pct_hr" => st.pct_hr.map(|p| format!("{:.1} %/h", p)),
         "exp_window" => st.exp_5m.map(|e| format!("{} min  {}", s.window_min, num(e))),
-        "eta" => {
-            let m = if s.eta_recent { st.eta_recent_min.or(st.eta_min) } else { st.eta_min };
-            m.map(|m| format!("Lv in {}", eta(m)))
-        }
+        "eta" => eta_minutes(s, st).map(|m| format!("Lv in {}", eta(m))),
         // (a problem or pause message takes the percentage's place, as the status line)
         "level" => st.level.map(|l| format!("Lv {l}")),
         "pct" if !problem => st.pct.map(|p| format!("{:.2}%", p)),
@@ -146,16 +195,19 @@ fn build_rows(s: &Settings, st: &Stats, status: &str) -> Vec<Row> {
     } else {
         None
     };
+    // close to the next level: the percent, level and time to level get a rainbow gradient
+    let near = near_level_up(s, st);
     let mut rows: Vec<Row> = Vec::new();
     for it in s.items.iter().filter(|i| i.show) {
         let Some(text) = item_text(&it.id, s, st, problem.is_some()) else { continue };
         if it.newline || rows.is_empty() {
             rows.push(Vec::new());
         }
-        rows.last_mut().unwrap().push((text, it.tone));
+        let tone = if near && matches!(it.id.as_str(), "pct" | "level" | "eta") { TONE_RAINBOW } else { it.tone };
+        rows.last_mut().unwrap().push((text, tone));
     }
     if let Some(p) = problem {
-        rows.push(vec![(p, TONE_STATUS)]);
+        rows.insert(0, vec![(p, TONE_STATUS)]); // above the items, so the layout below keeps its place
     }
     if rows.is_empty() {
         rows.push(vec![(APP_NAME.to_string(), TONE_STATUS)]); // everything switched off: never an empty box
@@ -197,8 +249,22 @@ impl App {
             self.game_up = up;
             self.last_hash = 0;
             self.set_look_timer();
+            dlog!("game_up -> {up}");
         }
+        if !up && !force_save && !capture::screen_forced() {
+            // no game, nothing on screen to read: skip the capture, the hash and the search altogether
+            dlog!("look: game not running, skipped");
+            self.last_hash = 0;
+            self.last_reading = None;
+            self.status = "Waiting for MapleStory...";
+            self.tracker.observe(now, None);
+            self.templates = None;
+            trim_memory();
+            return;
+        }
+        let t0 = Instant::now();
         let (frame, via) = grab(self.s.capture == CaptureMode::Window, x, y, cw, ch);
+        let grab_us = t0.elapsed().as_micros();
         if via != self.via {
             self.via = via;
             self.last_hash = 0;
@@ -211,8 +277,10 @@ impl App {
                 } else {
                     self.last_hash = hsh;
                     // (the digit templates, about 0.6 MB, are loaded only when there is a picture to read)
+                    let t1 = Instant::now();
                     let templates = self.templates.get_or_insert_with(Templates::builtin);
                     let r = find_and_read(templates, &f).map(|(_, r)| r);
+                    dlog!("look: {}x{} via {via}, grab {grab_us}us, read {}us -> {r:?}", f.w, f.h, t1.elapsed().as_micros());
                     self.last_reading = r;
                     if (r.is_none() && self.game_up) || force_save {
                         // keep what was seen, so a failure can be looked at
@@ -230,6 +298,8 @@ impl App {
             }
             None => None,
         };
+        // (the time right now, not the `now` from before the read: a slow read would otherwise age the effects before they start)
+        self.note_gain(reading, self.start.elapsed().as_secs_f64());
         if reading.is_some() {
             self.misses = 0;
             self.status = "";
@@ -246,18 +316,219 @@ impl App {
             self.templates = None;
             trim_memory(); // give back what the pages touched by this look used: an idle overlay stays tiny
         }
+        self.set_look_timer();
     }
 
-    unsafe fn set_look_timer(&self) {
+    /// How long to wait before the next look.
+    fn look_ms(&self) -> u32 {
         // no area selected: nothing to look at, only wait for the box being set; no game: look rarely
-        let ms = if self.s.region.is_none() {
+        if self.s.region.is_none() {
             SLOW_MS
         } else if !self.game_up {
             IDLE_MS
         } else {
-            self.s.poll_secs as u32 * 1000
+            self.s.poll_ms as u32 // exactly what the settings say: EXP shows up within one look
+        }
+    }
+
+    /// (Re)starts the look timer at the rate that fits now; does nothing when it already runs at that rate.
+    unsafe fn set_look_timer(&mut self) {
+        let ms = self.look_ms();
+        if ms != self.timer_ms {
+            self.timer_ms = ms;
+            SetTimer(self.hwnd, TIMER_LOOK, ms, None);
+            dlog!("look timer -> {ms}ms");
+        }
+    }
+
+    // ------------------------------------------------------------ effects
+
+    /// Compares this reading with the last one: EXP that came in starts a snail and the pop-up.
+    unsafe fn note_gain(&mut self, reading: Option<Reading>, now: f64) {
+        let Some(r) = reading else { return };
+        let prev = self.fx.prev.replace(r);
+        let Some(p) = prev.filter(|_| self.s.anim_pop || self.s.anim_snail) else { return };
+        let gain = match (r.exp, p.exp) {
+            (Some(e), Some(pe)) if e > pe => Some(((e - pe) as f64, false)),
+            (None, None) if r.pct > p.pct => Some((r.pct - p.pct, true)),
+            _ => None, // no gain (or the level went up: the number went down)
         };
-        SetTimer(self.hwnd, TIMER_LOOK, ms, None);
+        let Some((amount, pct)) = gain else { return };
+        dlog!("fx: gain {amount} (percent: {pct})");
+        if self.s.anim_snail {
+            self.fx.walkers.spawn(now);
+        }
+        if self.s.anim_pop {
+            if self.fx.pop_pct != pct {
+                self.fx.pop = Pop::default(); // percent and EXP don't add up
+            }
+            self.fx.pop_pct = pct;
+            self.fx.pop.add(amount, now);
+        }
+        self.start_fx();
+    }
+
+    /// The menu's "Preview effects", for seeing the effects without waiting for a kill: one pretend gain. Only the effects
+    /// switched on in the settings show.
+    unsafe fn preview_fx(&mut self) {
+        let now = self.start.elapsed().as_secs_f64();
+        if self.s.anim_snail {
+            self.fx.walkers.spawn(now);
+        }
+        if self.s.anim_pop {
+            self.fx.pop_pct = false;
+            self.fx.pop.add(1234.0, now);
+        }
+        self.start_fx();
+    }
+
+    /// Runs the effect timer at `ms` (starts it, or changes its speed).
+    unsafe fn set_fx_timer(&mut self, ms: u32) {
+        if !self.fx.on || self.fx.ms != ms {
+            self.fx.on = true;
+            self.fx.ms = ms;
+            SetTimer(self.hwnd, TIMER_ANIM, ms, None);
+            dlog!("fx: timer -> {ms}ms");
+        }
+    }
+
+    unsafe fn start_fx(&mut self) {
+        self.set_fx_timer(ANIM_MS);
+    }
+
+    /// Something is moving (rolling, floating, crawling).
+    fn fx_busy(&self, now: f64) -> bool {
+        self.fx.eased.iter().any(|e| e.busy(now)) || self.fx.pop.alive(now) || self.fx.walkers.alive(now)
+    }
+
+    /// Shows rolling numbers instead of the real ones.
+    unsafe fn fx_apply(&mut self, st: &mut Stats, now: f64) {
+        if !self.s.anim_count {
+            return;
+        }
+        let e = &mut self.fx.eased;
+        st.exp_now = st.exp_now.map(|v| e[0].at(v as f64, now).round() as u64);
+        st.pct = st.pct.map(|v| e[1].at(v, now));
+        st.gained_exp = st.gained_exp.map(|v| e[2].at(v, now));
+        st.gained_pct = e[3].at(st.gained_pct, now);
+        if e.iter().any(|x| x.busy(now)) {
+            self.start_fx();
+        }
+    }
+
+    /// One frame of the effects; stops the timer when nothing is showing any more.
+    unsafe fn fx_tick(&mut self) {
+        let now = self.start.elapsed().as_secs_f64();
+        self.refresh();
+        self.update_pop(now);
+        self.update_walkers(now);
+        if self.fx_busy(now) {
+            self.set_fx_timer(ANIM_MS);
+        } else if self.fx.near {
+            self.set_fx_timer(RAINBOW_MS);
+        } else {
+            KillTimer(self.hwnd, TIMER_ANIM);
+            dlog!("fx: done");
+            self.fx.on = false;
+            self.hide_pop();
+        }
+    }
+
+    /// Moves the "+EXP" pop-up (its own little see-through window) just above the overlay, floating up and fading.
+    unsafe fn update_pop(&mut self, now: f64) {
+        let shown = self.fx.pop.look(now).filter(|_| !self.hidden && !self.auto_hidden);
+        let Some((alpha, rise)) = shown else {
+            self.hide_pop();
+            return;
+        };
+        if self.fx.pop_hwnd.is_null() {
+            self.fx.pop_hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                wide(POP_CLASS).as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            if self.fx.pop_hwnd.is_null() {
+                return;
+            }
+        }
+        let pop = self.fx.pop_hwnd;
+        let sum = self.fx.pop.sum;
+        let text = if self.fx.pop_pct {
+            format!("+{sum:.2}%")
+        } else if self.s.short_numbers {
+            format!("+{}", short(sum))
+        } else {
+            format!("+{}", commas(sum.round() as u64))
+        };
+        if text != self.fx.pop_text {
+            let dc = GetDC(self.hwnd);
+            let old = SelectObject(dc, self.fx.pop_font);
+            let mut tm: TEXTMETRICW = zeroed();
+            GetTextMetricsW(dc, &mut tm);
+            self.fx.pop_size = (text_width(dc, &text) + 4, tm.tmHeight + 2);
+            SelectObject(dc, old);
+            ReleaseDC(self.hwnd, dc);
+            self.fx.pop_text = text;
+            InvalidateRect(pop, null(), 0);
+        } else if self.fx.near {
+            InvalidateRect(pop, null(), 0); // same text, but the rainbow colours move every frame
+        }
+        let (w, h) = self.fx.pop_size;
+        let mut r: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut r);
+        let scale = self.dpi as f64 / 96.0;
+        let lift = (rise * 22.0 * scale) as i32;
+        // above the overlay (and the snail strip, if that is on), or below it when it sits at the top of the screen
+        let strip = self.strip_height(now);
+        let y = if r.top >= h + strip + (30.0 * scale) as i32 { r.top - h - 2 - lift - strip } else { r.bottom + 2 + lift + strip };
+        SetLayeredWindowAttributes(pop, POP_KEY, alpha, LWA_COLORKEY | LWA_ALPHA);
+        SetWindowPos(pop, HWND_TOPMOST, r.left + (8.0 * scale) as i32, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    unsafe fn hide_pop(&mut self) {
+        if !self.fx.pop_hwnd.is_null() {
+            ShowWindow(self.fx.pop_hwnd, SW_HIDE);
+        }
+        self.fx.pop_text.clear();
+    }
+
+    unsafe fn paint_pop(&self, hwnd: HWND) {
+        let mut ps: PAINTSTRUCT = zeroed();
+        let dc = BeginPaint(hwnd, &mut ps);
+        let mut r: RECT = zeroed();
+        GetClientRect(hwnd, &mut r);
+        let key = CreateSolidBrush(POP_KEY);
+        FillRect(dc, &r, key);
+        DeleteObject(key);
+        SetBkMode(dc, TRANSPARENT as i32);
+        let old = SelectObject(dc, self.fx.pop_font);
+        if self.fx.near {
+            // close to the next level: the +EXP shimmers in the same rainbow as the text
+            let (n, phase) = (self.fx.pop_text.chars().count().max(1) as f64, self.start.elapsed().as_secs_f64() * 0.4);
+            let mut x = 2;
+            for (k, ch) in self.fx.pop_text.chars().enumerate() {
+                SetTextColor(dc, anim::rainbow(k as f64 / n * 0.85 + phase));
+                let s = ch.to_string();
+                let t: Vec<u16> = s.encode_utf16().collect();
+                TextOutW(dc, x, 1, t.as_ptr(), t.len() as i32);
+                x += text_width(dc, &s);
+            }
+        } else {
+            SetTextColor(dc, rgb(&self.s.accent));
+            let t: Vec<u16> = self.fx.pop_text.encode_utf16().collect();
+            TextOutW(dc, 2, 1, t.as_ptr(), t.len() as i32);
+        }
+        SelectObject(dc, old);
+        EndPaint(hwnd, &ps);
     }
 
     // ------------------------------------------------------------ look and feel
@@ -269,6 +540,11 @@ impl App {
         let height = -(self.s.font_size * self.dpi as i32 / 72);
         let weight = if self.s.bold { 700 } else { 400 };
         self.font = CreateFontW(height, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, wide(&self.s.font).as_ptr());
+        // the pop-up is drawn on a see-through colour key, where smoothed text edges would show as fringes
+        if !self.fx.pop_font.is_null() {
+            DeleteObject(self.fx.pop_font);
+        }
+        self.fx.pop_font = CreateFontW(height, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 3, 0, wide(&self.s.font).as_ptr());
     }
 
     /// Everything the settings control, applied to the live window.
@@ -311,6 +587,7 @@ impl App {
         if let Some([x, y]) = s.pos {
             let mut r: RECT = zeroed();
             GetWindowRect(self.hwnd, &mut r);
+            let y = y - self.status_shift;
             if (r.left, r.top) != (x, y) {
                 SetWindowPos(self.hwnd, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
@@ -331,7 +608,10 @@ impl App {
             self.rows.clear();
         }
         let now = self.start.elapsed().as_secs_f64();
-        let st = self.tracker.stats(now);
+        let mut st = self.tracker.stats(now);
+        if self.s.anim_any() {
+            self.fx_apply(&mut st, now);
+        }
         // hide by itself when nothing has come in for a while, and come back with the next EXP
         let idle_for = st.since_gain.unwrap_or(now);
         let want_hidden = self.s.hide_idle && idle_for >= self.s.hide_after_secs as f64;
@@ -341,8 +621,21 @@ impl App {
         }
         let short_note = self.note.split('|').next().unwrap_or("");
         let status = if !self.status.is_empty() && !short_note.is_empty() { short_note } else { self.status };
+        // close to the next level: the rainbow text shimmers, which keeps a slow timer running
+        let has_status = !status.is_empty() || st.paused;
+        let near = near_level_up(&self.s, &st);
+        if near != self.fx.near {
+            dlog!("fx: near level-up {near} (eta {:?} min, paused {})", eta_minutes(&self.s, &st), st.paused);
+        }
+        self.fx.near = near;
         let rows = build_rows(&self.s, &st, status);
+        if self.fx.near && !self.fx.on {
+            self.set_fx_timer(RAINBOW_MS);
+        }
         if rows == self.rows {
+            if self.fx.on {
+                InvalidateRect(self.hwnd, null(), 0); // same text, but the colours are moving
+            }
             return;
         }
         self.rows = rows;
@@ -362,9 +655,18 @@ impl App {
         let pad = 8 * self.dpi as i32 / 96;
         let line = tm.tmHeight + 2 * self.dpi as i32 / 96;
         let size = (widest + 2 * pad, self.rows.len() as i32 * line + 2 * pad - self.dpi as i32 / 96 * 2);
-        if size != self.size {
+        // A problem or pause message adds a row on top. The box then grows upwards, its bottom edge staying where it is:
+        // growing down would cover the EXP bar the overlay is reading, and the covered bar is then what the message
+        // complains about. `status_shift` is how far up the box sits for that row, so the saved position stays the one
+        // without it.
+        let want_shift = if has_status { line } else { 0 };
+        let dy = want_shift - self.status_shift;
+        if size != self.size || dy != 0 {
             self.size = size;
-            SetWindowPos(self.hwnd, null_mut(), 0, 0, size.0, size.1, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let mut r: RECT = zeroed();
+            GetWindowRect(self.hwnd, &mut r);
+            SetWindowPos(self.hwnd, null_mut(), r.left, r.top - dy, size.0, size.1, SWP_NOZORDER | SWP_NOACTIVATE);
+            self.status_shift = want_shift;
         }
         InvalidateRect(self.hwnd, null(), 0);
     }
@@ -390,14 +692,118 @@ impl App {
         let gap = tm.tmAveCharWidth * 3;
         for (i, row) in self.rows.iter().enumerate() {
             let mut x = pad;
+            let y = pad - self.dpi as i32 / 96 * 2 + i as i32 * line;
             for (text, tone) in row {
+                if *tone == TONE_RAINBOW {
+                    // one letter at a time, each its own colour along the wheel (red to violet)
+                    let n = text.chars().count().max(1) as f64;
+                    let phase = self.start.elapsed().as_secs_f64() * 0.4; // the colours drift along the letters
+                    for (k, ch) in text.chars().enumerate() {
+                        SetTextColor(mem, anim::rainbow(k as f64 / n * 0.85 + phase));
+                        let s = ch.to_string();
+                        let t: Vec<u16> = s.encode_utf16().collect();
+                        TextOutW(mem, x, y, t.as_ptr(), t.len() as i32);
+                        x += text_width(mem, &s);
+                    }
+                    x += gap;
+                    continue;
+                }
                 SetTextColor(mem, rgb(config::tone_hex(&self.s, *tone)));
                 let t: Vec<u16> = text.encode_utf16().collect();
-                TextOutW(mem, x, pad - self.dpi as i32 / 96 * 2 + i as i32 * line, t.as_ptr(), t.len() as i32);
+                TextOutW(mem, x, y, t.as_ptr(), t.len() as i32);
                 x += text_width(mem, text) + gap;
             }
         }
         SelectObject(mem, old_font);
+        BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old_bmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(hwnd, &ps);
+    }
+
+    /// The snails: a see-through strip as wide as the overlay, standing on its top edge (or hanging under it when there
+    /// is no room above), that the crawling snails are drawn into.
+    unsafe fn update_walkers(&mut self, now: f64) {
+        let walking = self.fx.walkers.alive(now) && !self.hidden && !self.auto_hidden;
+        if !walking {
+            if !self.fx.walker_hwnd.is_null() {
+                ShowWindow(self.fx.walker_hwnd, SW_HIDE);
+            }
+            return;
+        }
+        if self.fx.walker_hwnd.is_null() {
+            self.fx.walker_hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                wide(WALKER_CLASS).as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            if self.fx.walker_hwnd.is_null() {
+                return;
+            }
+            SetLayeredWindowAttributes(self.fx.walker_hwnd, POP_KEY, 255, LWA_COLORKEY);
+        }
+        let mut r: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut r);
+        let sh = self.strip_height(now);
+        let y = if r.top >= sh { r.top - sh } else { r.bottom };
+        SetWindowPos(self.fx.walker_hwnd, HWND_TOPMOST, r.left, y, r.right - r.left, sh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        InvalidateRect(self.fx.walker_hwnd, null(), 0);
+    }
+
+    /// Half screen pixels per sprite pixel (see `anim::cell_start`).
+    fn walker_px(&self) -> i32 {
+        (anim::SNAIL_PX * self.dpi as i32 / 96).max(1)
+    }
+
+    /// How tall the snail strip is right now: a snail's height while any is crawling, else 0.
+    fn strip_height(&self, now: f64) -> i32 {
+        if self.fx.walkers.alive(now) {
+            anim::cell_start(anim::SPRITE_H, self.walker_px())
+        } else {
+            0
+        }
+    }
+
+    unsafe fn paint_walkers(&self, hwnd: HWND) {
+        let mut ps: PAINTSTRUCT = zeroed();
+        let dc = BeginPaint(hwnd, &mut ps);
+        let mut r: RECT = zeroed();
+        GetClientRect(hwnd, &mut r);
+        let mem = CreateCompatibleDC(dc);
+        let bmp = CreateCompatibleBitmap(dc, r.right.max(1), r.bottom.max(1));
+        let old_bmp = SelectObject(mem, bmp);
+        let key = CreateSolidBrush(POP_KEY);
+        FillRect(mem, &r, key);
+        DeleteObject(key);
+        let old = SelectObject(mem, GetStockObject(DC_BRUSH));
+        let now = self.start.elapsed().as_secs_f64();
+        let frame = (now * 3.0) as usize % 2; // the eye stalks and the foot move
+        let px = self.walker_px();
+        let sw = anim::cell_start(anim::SPRITE_W, px);
+        let y0 = r.bottom - anim::cell_start(anim::SPRITE_H, px); // standing on the bottom of the strip
+        for t in self.fx.walkers.progress(now) {
+            let x0 = r.right - ((r.right + sw) as f64 * t) as i32;
+            for (row, line) in anim::SPRITE[frame].iter().enumerate() {
+                for (col, c) in line.bytes().enumerate() {
+                    let Some(color) = anim::sprite_color(c) else { continue };
+                    SetDCBrushColor(mem, color);
+                    let (l, t) = (anim::cell_start(col, px), anim::cell_start(row, px));
+                    let (w, h) = (anim::cell_start(col + 1, px) - l, anim::cell_start(row + 1, px) - t);
+                    PatBlt(mem, x0 + l, y0 + t, w, h, PATCOPY);
+                }
+            }
+        }
+        SelectObject(mem, old);
         BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
         DeleteObject(bmp);
@@ -491,6 +897,7 @@ unsafe fn show_menu(hwnd: HWND) {
     let menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_SETTINGS, wide("Settings...").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_RESET, wide("Reset session").as_ptr());
+    AppendMenuW(menu, MF_STRING, ID_PREVIEW, wide("Preview effects").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_TOGGLE, wide(if hidden { "Show overlay" } else { "Hide overlay" }).as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit").as_ptr());
@@ -507,6 +914,9 @@ unsafe fn show_menu(hwnd: HWND) {
                 app.refresh();
             });
         }
+        ID_PREVIEW => {
+            with_app(|app| app.preview_fx());
+        }
         ID_TOGGLE => toggle_visible(),
         ID_QUIT => {
             DestroyWindow(hwnd);
@@ -519,7 +929,8 @@ unsafe fn save_pos(hwnd: HWND) {
     let mut r: RECT = zeroed();
     GetWindowRect(hwnd, &mut r);
     let mut s = Settings::load();
-    s.pos = Some([r.left, r.top]);
+    let shift = with_app(|app| app.status_shift).unwrap_or(0); // (the saved position is the one without the message row)
+    s.pos = Some([r.left, r.top + shift]);
     s.save();
     with_app(|app| {
         app.s.pos = s.pos;
@@ -537,6 +948,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         app.refresh();
                     } else if wp == TIMER_CFG {
                         app.check_config();
+                    } else if wp == TIMER_ANIM {
+                        app.fx_tick();
                     }
                 });
                 0
@@ -613,6 +1026,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
+/// The "+EXP" pop-up window: a see-through, click-through strip of text (see `App::update_pop`).
+unsafe extern "system" fn pop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_PAINT => {
+                let painted = APP.with(|a| match a.try_borrow().ok().as_deref() {
+                    Some(Some(app)) => {
+                        app.paint_pop(hwnd);
+                        true
+                    }
+                    _ => false,
+                });
+                if !painted {
+                    let mut ps: PAINTSTRUCT = zeroed();
+                    BeginPaint(hwnd, &mut ps);
+                    EndPaint(hwnd, &ps);
+                }
+                0
+            }
+            WM_ERASEBKGND => 1,
+            WM_NCHITTEST => -1, // HTTRANSPARENT
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// The snails' window: see-through and click-through (see `App::update_walkers`).
+unsafe extern "system" fn walker_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_PAINT => {
+                let painted = APP.with(|a| match a.try_borrow().ok().as_deref() {
+                    Some(Some(app)) => {
+                        app.paint_walkers(hwnd);
+                        true
+                    }
+                    _ => false,
+                });
+                if !painted {
+                    let mut ps: PAINTSTRUCT = zeroed();
+                    BeginPaint(hwnd, &mut ps);
+                    EndPaint(hwnd, &ps);
+                }
+                0
+            }
+            WM_ERASEBKGND => 1,
+            WM_NCHITTEST => -1, // HTTRANSPARENT
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
 /// Another copy is already running: ask it to open the settings (so launching the exe again is never a dead end).
 unsafe fn poke_running_copy() {
     let h = FindWindowW(wide(CLASS).as_ptr(), null());
@@ -641,6 +1106,10 @@ pub fn run() {
             ..zeroed()
         };
         RegisterClassW(&wc);
+        let pop_class = wide(POP_CLASS);
+        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(pop_proc), hInstance: hinst, lpszClassName: pop_class.as_ptr(), ..zeroed() });
+        let walker_class = wide(WALKER_CLASS);
+        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(walker_proc), hInstance: hinst, lpszClassName: walker_class.as_ptr(), ..zeroed() });
         let (x, y) = s.pos.map_or((24, 24), |p| (p[0], p[1]));
         let (x, y) = on_screen(x, y);
         let hwnd = CreateWindowExW(
@@ -673,6 +1142,7 @@ pub fn run() {
                 tracker: Tracker::default(),
                 start: Instant::now(),
                 last_hash: 0,
+                timer_ms: 0,
                 last_reading: None,
                 note: String::new(),
                 via: "",
@@ -686,6 +1156,22 @@ pub fn run() {
                 auto_hidden: false,
                 tray_on: false,
                 size: (0, 0),
+                status_shift: 0,
+                fx: Fx {
+                    on: false,
+                    ms: 0,
+                    near: false,
+                    walkers: Walkers::default(),
+                    walker_hwnd: null_mut(),
+                    prev: None,
+                    pop: Pop::default(),
+                    pop_pct: false,
+                    pop_text: String::new(),
+                    pop_hwnd: null_mut(),
+                    pop_font: null_mut(),
+                    pop_size: (0, 0),
+                    eased: [Eased::default(); 4],
+                },
             })
         });
         with_app(|app| app.apply());
@@ -697,7 +1183,6 @@ pub fn run() {
         if with_app(|app| app.s.region.is_none()).unwrap_or(false) && !hidden {
             open_settings();
         }
-        SetTimer(hwnd, TIMER_LOOK, 500, None);
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);

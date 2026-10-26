@@ -72,12 +72,36 @@ pub struct Settings {
     /// The box around the EXP text, (x, y, w, h) in screen pixels. The user draws it (Settings > Capture > Select area);
     /// until then nothing is read.
     pub region: Option<[i32; 4]>,
-    /// Seconds between looks at the bar.
-    pub poll_secs: i32,
+    /// Milliseconds between looks at the bar while the game is running.
+    pub poll_ms: i32,
+    /// The old setting, in whole seconds. Only read, to carry a slower choice over to `poll_ms`; never written back.
+    #[serde(skip_serializing_if = "is_zero")]
+    poll_secs: i32,
+
+    // ---- animations
+    // Small effects when EXP comes in (see the `anim` module), each its own switch, all off by default.
+    /// EXP, percent and gained values count up to the new number instead of jumping.
+    pub anim_count: bool,
+    /// A "+EXP" that floats up above the overlay and fades.
+    pub anim_pop: bool,
+    /// A snail crawls along the top of the overlay for each EXP gain.
+    pub anim_snail: bool,
+    /// The percent, level, time to level and the +EXP pop-up shimmer in a rainbow gradient when the level is less than
+    /// `anim_rainbow_min` minutes away.
+    pub anim_rainbow: bool,
+    /// How close the level has to be for that, in minutes. Settings file only.
+    pub anim_rainbow_min: i32,
 
     // ---- general
     /// Start with the overlay hidden (tray only).
     pub start_hidden: bool,
+}
+
+/// The fastest the bar is looked at.
+pub const MIN_POLL_MS: i32 = 100;
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 impl Default for Settings {
@@ -107,7 +131,13 @@ impl Default for Settings {
             window_min: 5,
             capture: CaptureMode::Screen,
             region: None,
-            poll_secs: 1,
+            poll_ms: 250,
+            poll_secs: 0,
+            anim_count: false,
+            anim_pop: false,
+            anim_snail: false,
+            anim_rainbow: false,
+            anim_rainbow_min: 30,
             start_hidden: false,
         }
     }
@@ -259,6 +289,11 @@ impl Settings {
         }
     }
 
+    /// Any effect switched on.
+    pub fn anim_any(&self) -> bool {
+        self.anim_count || self.anim_pop || self.anim_snail
+    }
+
     pub fn clamp(&mut self) {
         let d = Settings::default();
         self.font_size = self.font_size.clamp(7, 40);
@@ -267,7 +302,12 @@ impl Settings {
         self.hide_after_secs = self.hide_after_secs.clamp(5, 3600);
         self.new_session_secs = self.new_session_secs.clamp(30, 7200);
         self.window_min = self.window_min.clamp(1, 60);
-        self.poll_secs = self.poll_secs.clamp(1, 10);
+        if self.poll_secs > 1 {
+            self.poll_ms = self.poll_secs.min(10) * 1000; // 1 second was the old default: that one gets the new default
+        }
+        self.poll_secs = 0;
+        self.poll_ms = self.poll_ms.clamp(MIN_POLL_MS, 10_000);
+        self.anim_rainbow_min = self.anim_rainbow_min.clamp(1, 600);
         if self.font.trim().is_empty() {
             self.font = d.font;
         }
@@ -314,6 +354,21 @@ pub const THEMES: [(&str, &str, &str, &str, &str); 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poll_rate_migrates_and_clamps() {
+        let load = |json: &str| {
+            let mut s: Settings = serde_json::from_str(json).unwrap();
+            s.clamp();
+            s
+        };
+        assert_eq!(load("{}").poll_ms, 250);
+        assert_eq!(load(r#"{"poll_secs": 1}"#).poll_ms, 250); // the old default gets the new one
+        assert_eq!(load(r#"{"poll_secs": 5}"#).poll_ms, 5000); // an explicit slower choice is kept
+        assert_eq!(load(r#"{"poll_ms": 10}"#).poll_ms, MIN_POLL_MS);
+        assert_eq!(load(r#"{"poll_ms": 999999}"#).poll_ms, 10_000);
+        assert!(!serde_json::to_string(&load(r#"{"poll_secs": 5}"#)).unwrap().contains("poll_secs"));
+    }
 
     #[test]
     fn defaults_survive_junk() {

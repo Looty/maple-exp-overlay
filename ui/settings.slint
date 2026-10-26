@@ -28,6 +28,10 @@ export struct Cfg {
     window-min: int,
     capture-index: int,
     poll-index: int,
+    anim-count: bool,
+    anim-pop: bool,
+    anim-snail: bool,
+    anim-rainbow: bool,
     autostart: bool,
     start-hidden: bool,
 }
@@ -383,6 +387,11 @@ export component SettingsWindow inherits Window {
                         }
                         Section { text: "Numbers"; }
                         Row { label: "Short numbers"; hint: "21.1K instead of 21,100"; Switch { checked: root.cfg.short-numbers; toggled => { root.cfg.short-numbers = self.checked; root.changed(); } } }
+                        Section { text: "Animations"; }
+                        Row { label: "Rolling numbers"; hint: "EXP, % and gained count up instead of jumping"; Switch { checked: root.cfg.anim-count; toggled => { root.cfg.anim-count = self.checked; root.changed(); } } }
+                        Row { label: "+EXP pop-up"; hint: "a +1,234 floats up above the overlay and fades"; Switch { checked: root.cfg.anim-pop; toggled => { root.cfg.anim-pop = self.checked; root.changed(); } } }
+                        Row { label: "Snail"; hint: "a new snail crawls along the top for each EXP gain"; Switch { checked: root.cfg.anim-snail; toggled => { root.cfg.anim-snail = self.checked; root.changed(); } } }
+                        Row { label: "Rainbow near level-up"; hint: "%, Lv, time to level and +EXP shimmer rainbow under 30 min to level"; Switch { checked: root.cfg.anim-rainbow; toggled => { root.cfg.anim-rainbow = self.checked; root.changed(); } } }
                         Section { text: "How it counts"; }
                         Row {
                             label: "Time to level uses";
@@ -479,10 +488,16 @@ export component SettingsWindow inherits Window {
                             label: "Look every";
                             ComboBox {
                                 width: 140px;
-                                model: ["1 second", "2 seconds", "5 seconds"];
+                                model: ["250 ms", "500 ms", "750 ms", "1000 ms"];
                                 current-index: root.cfg.poll-index;
                                 selected(v) => { root.cfg.poll-index = self.current-index; root.changed(); }
                             }
+                        }
+                        Text {
+                            text: "How often the bar is checked while the game is running. New EXP shows up within one check, so a shorter time is quicker to react and costs slightly more CPU.";
+                            wrap: word-wrap;
+                            color: #909090;
+                            font-size: 14px;
                         }
                         Section { text: "Test result"; }
                         Text {

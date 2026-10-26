@@ -192,44 +192,79 @@ fn exp_label_dot(wblobs: &[Blob], bracket: &Blob) -> Option<Blob> {
     None
 }
 
+/// What doesn't depend on the white cutoff: brightness, the low-saturation mask and the green bracket blobs.
+/// Computed once per picture, so trying another cutoff only redoes the white mask.
+struct Prep {
+    w: usize,
+    h: usize,
+    v: Vec<f32>,
+    low_sat: Vec<bool>,
+    glabels: Vec<u32>,
+    brackets: Vec<Blob>,
+}
+
+impl Prep {
+    /// None when there is no bracket-shaped green blob: no bar can be here, whatever the cutoff.
+    fn new(f: &Frame) -> Option<Prep> {
+        let (w, h) = (f.w, f.h);
+        let n = w * h;
+        let mut green = vec![false; n];
+        let mut low_sat = vec![false; n];
+        let mut v = vec![0f32; n];
+        for i in 0..n {
+            let (b, g, r) = (f.bgra[i * 4], f.bgra[i * 4 + 1], f.bgra[i * 4 + 2]);
+            let (hue, sat, val) = hsv(b, g, r);
+            v[i] = val as f32;
+            green[i] = sat >= 90 && val >= 110 && (26..=50).contains(&hue);
+            low_sat[i] = sat < 70;
+        }
+        let (glabels, gblobs) = blobs(&green, w, h);
+        let mut brackets: Vec<Blob> = gblobs.into_iter().filter(|b| b.h >= 5 && b.w as f32 <= 0.6 * b.h as f32).collect();
+        if brackets.is_empty() {
+            return None;
+        }
+        brackets.sort_by_key(|b| b.x);
+        Some(Prep { w, h, v, low_sat, glabels, brackets })
+    }
+}
+
 /// Locates the EXP text in a screenshot.
 pub fn find_exp(f: &Frame) -> Option<Found> {
-    WHITE_TRIES.iter().find_map(|&m| find_exp_at(f, m))
+    let mut prep = Prep::new(f)?;
+    for m in WHITE_TRIES {
+        if let Some(layout) = find_exp_at(&prep, m) {
+            return Some(Found { layout, v: std::mem::take(&mut prep.v), w: prep.w, h: prep.h });
+        }
+    }
+    None
 }
 
 /// Finds the bar and reads it, trying each white cutoff until one gives a clear reading.
 pub fn find_and_read(t: &Templates, f: &Frame) -> Option<(Found, Reading)> {
-    WHITE_TRIES.iter().find_map(|&m| {
-        let found = find_exp_at(f, m)?;
-        let r = read(t, &found)?;
-        Some((found, r))
-    })
+    let mut prep = Prep::new(f)?;
+    for m in WHITE_TRIES {
+        let Some(layout) = find_exp_at(&prep, m) else { continue };
+        let found = Found { layout, v: std::mem::take(&mut prep.v), w: prep.w, h: prep.h };
+        if let Some(r) = read(t, &found) {
+            return Some((found, r));
+        }
+        prep.v = found.v; // unclear digits at this cutoff: hand the brightness back for the next one
+    }
+    None
 }
 
-fn find_exp_at(f: &Frame, white_min: i32) -> Option<Found> {
-    let (w, h) = (f.w, f.h);
-    let n = w * h;
-    let mut green = vec![false; n];
-    let mut white = vec![false; n];
-    let mut v = vec![0f32; n];
-    for i in 0..n {
-        let (b, g, r) = (f.bgra[i * 4], f.bgra[i * 4 + 1], f.bgra[i * 4 + 2]);
-        let (hue, sat, val) = hsv(b, g, r);
-        v[i] = val as f32;
-        green[i] = sat >= 90 && val >= 110 && (26..=50).contains(&hue);
-        white[i] = sat < 70 && val >= white_min;
-    }
-    let (glabels, gblobs) = blobs(&green, w, h);
+fn find_exp_at(p: &Prep, white_min: i32) -> Option<Layout> {
+    let (w, h) = (p.w, p.h);
+    let white: Vec<bool> = p.low_sat.iter().zip(&p.v).map(|(&s, &v)| s && v as i32 >= white_min).collect();
     let (_, wblobs) = blobs(&white, w, h);
-    let mut brackets: Vec<Blob> = gblobs.into_iter().filter(|b| b.h >= 5 && b.w as f32 <= 0.6 * b.h as f32).collect();
-    brackets.sort_by_key(|b| b.x);
+    let (glabels, brackets) = (&p.glabels, &p.brackets);
 
     let mut found: Vec<Layout> = Vec::new();
-    for o in &brackets {
+    for o in brackets {
         let bh = o.h as f32;
         let cy = o.y as f32 + bh / 2.0;
         let on_line = |b: &Blob| (b.y as f32 + b.h as f32 / 2.0 - cy).abs() <= 0.3 * bh;
-        if o.w >= 6 && !left_heavy(&glabels, w, o) {
+        if o.w >= 6 && !left_heavy(glabels, w, o) {
             continue; // clearly a ']'
         }
         let Some(c) = brackets
@@ -238,7 +273,7 @@ fn find_exp_at(f: &Frame, white_min: i32) -> Option<Found> {
         else {
             continue;
         };
-        if c.w >= 6 && left_heavy(&glabels, w, c) {
+        if c.w >= 6 && left_heavy(glabels, w, c) {
             continue; // clearly another '['
         }
         let line: Vec<&Blob> = wblobs.iter().filter(|b| on_line(b) && b.h as f32 >= 0.6 * bh).collect();
@@ -294,8 +329,7 @@ fn find_exp_at(f: &Frame, white_min: i32) -> Option<Found> {
     }
     // The status bar is the lowest line found; EXP is the right-most value on it.
     let low = found.iter().map(|l| l.cy).fold(f32::MIN, f32::max);
-    let best = found.into_iter().filter(|l| l.cy >= low - 0.5 * l.gh).max_by_key(|l| l.bbox.0)?;
-    Some(Found { layout: best, v, w, h })
+    found.into_iter().filter(|l| l.cy >= low - 0.5 * l.gh).max_by_key(|l| l.bbox.0)
 }
 
 // ---------------------------------------------------------------- digit templates
@@ -323,6 +357,46 @@ fn unit_rows(a: &mut [f32]) {
             *x /= norm;
         }
     }
+}
+
+/// Dot product, the hot loop of the whole program. The release profile is size-optimised (`opt-level = "s"`), which doesn't
+/// vectorise, so on x86-64 (SSE is always there) it is written out by hand: about 6x faster for no extra size to speak of.
+#[cfg(target_arch = "x86_64")]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    // SAFETY: SSE is part of x86-64; every load stays inside the first `n` elements of both slices.
+    unsafe {
+        let (mut s0, mut s1) = (_mm_setzero_ps(), _mm_setzero_ps());
+        while i + 8 <= n {
+            s0 = _mm_add_ps(s0, _mm_mul_ps(_mm_loadu_ps(a.as_ptr().add(i)), _mm_loadu_ps(b.as_ptr().add(i))));
+            s1 = _mm_add_ps(s1, _mm_mul_ps(_mm_loadu_ps(a.as_ptr().add(i + 4)), _mm_loadu_ps(b.as_ptr().add(i + 4))));
+            i += 8;
+        }
+        let mut lanes = [0f32; 4];
+        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(s0, s1));
+        let mut s: f32 = lanes.iter().sum();
+        while i < n {
+            s += a[i] * b[i];
+            i += 1;
+        }
+        s
+    }
+}
+
+/// Same thing for other CPUs: 8 independent running sums, so the compiler can vectorise it where it does.
+#[cfg(not(target_arch = "x86_64"))]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail: f32 = ca.remainder().iter().zip(cb.remainder()).map(|(x, y)| x * y).sum();
+    let mut acc = [0f32; 8];
+    for (x, y) in ca.zip(cb) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 pub struct Templates {
@@ -358,7 +432,7 @@ impl Templates {
         for (t, row) in self.mat.chunks_exact(WIN).enumerate() {
             let d = self.labels[t] as usize;
             for win in wins.chunks_exact(WIN) {
-                let s: f32 = win.iter().zip(row).map(|(a, b)| a * b).sum();
+                let s = dot(win, row);
                 if s > best[d] {
                     best[d] = s;
                 }

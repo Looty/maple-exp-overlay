@@ -61,6 +61,11 @@ pub fn hash(f: &Frame) -> u64 {
     h
 }
 
+/// `--screen`: ignore the game window and read the primary screen.
+pub fn screen_forced() -> bool {
+    std::env::args().any(|a| a == "--screen")
+}
+
 /// The game's window, if one is found (the largest MapleStory window).
 pub unsafe fn game_hwnd() -> HWND {
     unsafe extern "system" fn each(hwnd: HWND, lp: LPARAM) -> BOOL {
@@ -87,7 +92,7 @@ pub unsafe fn game_hwnd() -> HWND {
         1
     }
     let mut best: (i64, HWND) = (0, null_mut());
-    if !std::env::args().any(|a| a == "--screen") {
+    if !screen_forced() {
         EnumWindows(Some(each), &mut best as *mut _ as LPARAM);
     }
     best.1
