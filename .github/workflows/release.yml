@@ -65,14 +65,20 @@ jobs:
           $hash = (Get-FileHash minisign.zip -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479") { Write-Error "minisign download changed: $hash"; exit 1 }
           Expand-Archive minisign.zip minisign-bin
-          $minisign = (Get-ChildItem -Recurse minisign-bin -Filter minisign.exe | Select-Object -First 1).FullName
+          # (the zip holds an x86_64 and an aarch64 build: take the x86_64 one)
+          $minisign = (Get-ChildItem -Recurse minisign-bin -Filter minisign.exe | Where-Object FullName -match 'x86_64' | Select-Object -First 1).FullName
+          if (-not $minisign) { Write-Error "no x86_64 minisign.exe in the download"; exit 1 }
           $key = Join-Path $env:RUNNER_TEMP "minisign.key"
           Set-Content -Path $key -Value $env:MINISIGN_SECRET_KEY -Encoding ascii
           Copy-Item target/release/maple-exp-overlay.exe maple-exp-overlay.exe
-          & $minisign -S -s $key -m maple-exp-overlay.exe -t "maple-exp-overlay ${{ github.ref_name }}"
-          $code = $LASTEXITCODE
-          Remove-Item $key
+          try {
+            & $minisign -S -s $key -m maple-exp-overlay.exe -t "maple-exp-overlay ${{ github.ref_name }}"
+            $code = $LASTEXITCODE
+          } finally {
+            Remove-Item $key -ErrorAction SilentlyContinue
+          }
           if ($code -ne 0) { exit $code }
+          if (-not (Test-Path maple-exp-overlay.exe.minisig)) { Write-Error "no signature was written"; exit 1 }
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
