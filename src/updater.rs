@@ -169,4 +169,16 @@ mod tests {
         assert_eq!(body.len() as u64, asset["size"].as_u64().unwrap(), "the whole file arrived");
         assert!(http_get("http://example.com/", "*/*").is_err(), "plain http is refused");
     }
+
+    /// The latest published release would install: its exe downloads and carries a valid signature from our key for
+    /// its own version. Run after each release: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn latest_release_is_signed() {
+        let url = format!("https://api.github.com/repos/{}/releases/latest", update::REPO);
+        let rel = update::parse_latest(&http_get(&url, "application/vnd.github+json").unwrap()).expect("a signed release");
+        let exe = http_get(&rel.exe_url, "application/octet-stream").unwrap();
+        let sig = http_get(&rel.sig_url, "application/octet-stream").unwrap();
+        assert_eq!(update::verify(&exe, &String::from_utf8_lossy(&sig), update::PUBLIC_KEY, &rel.tag), Ok(()), "release {}", rel.tag);
+    }
 }
