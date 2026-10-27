@@ -35,6 +35,7 @@ const IDLE_MS: u32 = 5000; // while MapleStory isn't running
 const LOST_AFTER: u32 = 5; // failed looks in a row before saying the bar can't be read
 const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_SHOW: u32 = WM_APP + 2; // another launch of the exe asks this one to open the settings
+const WM_UNMINIMIZE: u32 = WM_APP + 3; // posted when Windows minimized the overlay (Win+D, Win+M, a taskbar click)
 const ID_SETTINGS: usize = 1;
 const ID_RESET: usize = 2;
 const ID_TOGGLE: usize = 3;
@@ -829,6 +830,23 @@ impl App {
         }
     }
 
+    /// While the game is up, puts the overlay back if Windows took it away: minimized (Win+D, Win+M, a taskbar click
+    /// with "Taskbar button" on), or pushed under the game when the game window came to the front (a game window
+    /// that is itself topmost lands above us). Never shows a window the user or idle-hiding hid.
+    unsafe fn keep_shown(&self) {
+        if !self.game_up || self.hidden || self.auto_hidden {
+            return;
+        }
+        if IsIconic(self.hwnd) != 0 {
+            dlog!("overlay was minimized: restoring");
+            ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        // only while the game is in front, so the settings window and the area picker can still sit above the overlay
+        if self.s.topmost && capture::game_in_front() {
+            SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
     /// Re-reads the settings file if the settings window saved a change.
     unsafe fn check_config(&mut self) {
         let m = config::modified();
@@ -946,6 +964,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     if wp == TIMER_LOOK {
                         app.look(false);
                         app.refresh();
+                        app.keep_shown();
                     } else if wp == TIMER_CFG {
                         app.check_config();
                     } else if wp == TIMER_ANIM {
@@ -1006,6 +1025,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                 });
                 open_settings();
+                0
+            }
+            // the overlay is never minimized: with a taskbar button, Win+D, Win+M or a click on that button would
+            // otherwise make it vanish until restarted
+            WM_SYSCOMMAND if (wp & 0xFFF0) as u32 == SC_MINIMIZE => 0,
+            WM_SIZE => {
+                if wp as u32 == SIZE_MINIMIZED {
+                    PostMessageW(hwnd, WM_UNMINIMIZE, 0, 0); // (not from inside the minimize itself)
+                }
+                0
+            }
+            WM_UNMINIMIZE => {
+                if IsIconic(hwnd) != 0 && !with_app(|a| a.hidden || a.auto_hidden).unwrap_or(false) {
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
                 0
             }
             WM_EXITSIZEMOVE => {
