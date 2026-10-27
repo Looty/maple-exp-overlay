@@ -137,8 +137,10 @@ fn eta(min: f64) -> String {
         format!("{:.0} h", min / 60.0)
     } else if min >= 60.0 {
         format!("{}h {:02}m", (min / 60.0) as u32, (min % 60.0) as u32)
+    } else if min < 1.0 {
+        "<1 min".to_string()
     } else {
-        format!("{:.0} min", min.max(1.0))
+        format!("{:.0} min", min)
     }
 }
 
