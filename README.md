@@ -2,12 +2,16 @@
 
 A tiny EXP/hr overlay for MapleStory Classic World. Rust, no OCR engine, no runtime files. It only looks at your screen: it never touches the game's files or memory and never sends input.
 
+![The overlay in game, just above the EXP bar: EXP/h, time to the next level, time played and EXP gained](docs/overlay.png)
+
 > **Unofficial.** This is a fan-made tool. It is not made, endorsed or supported by Nexon and is not affiliated with Nexon. MapleStory is a trademark of Nexon. Using any third-party tool with an online game is at your own risk: read Nexon's Terms of Service, and if you are unsure whether a screen-reading tool is allowed, ask Nexon support. Nexon can act on an account at its own discretion.
 
 ## Install
 
 1. Download the latest `maple-exp-overlay-<version>-windows-x64.zip` from the repository's Releases page.
 2. Unzip it anywhere and run `maple-exp-overlay.exe`. Nothing is installed; to uninstall, quit it from the tray, delete the folder and `%APPDATA%\MapleExpOverlay`.
+
+From 0.4.1 on, **Settings > About > Check for updates** downloads and installs new versions. It installs only releases signed with this project's key.
 
 The executable is not code-signed, so Windows SmartScreen may show "Windows protected your PC". Click "More info", then "Run anyway". To check the download, compare its SHA-256 with the `.sha256` file on the release page:
 
@@ -27,6 +31,8 @@ The overlay reads nothing until an area is selected, and it never searches for t
 Launching the exe again while it runs opens the settings.
 
 ## Settings
+
+![The settings window: the layout editor on top, then the Overlay tab with theme, font, colours and position](docs/settings.png)
 
 | Tab | What's there |
 |---|---|
