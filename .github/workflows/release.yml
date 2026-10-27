@@ -51,10 +51,35 @@ jobs:
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
           "ASSET=$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
+      # The in-app updater downloads the bare exe and accepts it only with a valid signature from the key whose public
+      # half is built into the app (src/update.rs). The secret key (a minisign key made with -W, no password) is the
+      # repository secret MINISIGN_SECRET_KEY. The trusted comment names the release, so an old exe can't pose as new.
+      - name: Sign the exe for the in-app updater
+        shell: pwsh
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if (-not $env:MINISIGN_SECRET_KEY) { Write-Error "The MINISIGN_SECRET_KEY secret is missing"; exit 1 }
+          # minisign 0.12, pinned by its SHA-256
+          Invoke-WebRequest https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip -OutFile minisign.zip
+          $hash = (Get-FileHash minisign.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479") { Write-Error "minisign download changed: $hash"; exit 1 }
+          Expand-Archive minisign.zip minisign-bin
+          $minisign = (Get-ChildItem -Recurse minisign-bin -Filter minisign.exe | Select-Object -First 1).FullName
+          $key = Join-Path $env:RUNNER_TEMP "minisign.key"
+          Set-Content -Path $key -Value $env:MINISIGN_SECRET_KEY -Encoding ascii
+          Copy-Item target/release/maple-exp-overlay.exe maple-exp-overlay.exe
+          & $minisign -S -s $key -m maple-exp-overlay.exe -t "maple-exp-overlay ${{ github.ref_name }}"
+          $code = $LASTEXITCODE
+          Remove-Item $key
+          if ($code -ne 0) { exit $code }
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+            maple-exp-overlay.exe
+            maple-exp-overlay.exe.minisig
           generate_release_notes: true

@@ -118,6 +118,14 @@ export component SettingsWindow inherits Window {
     in property <int> test-countdown: 0;
     callback test-in-game();
     in property <string> version;
+    /// The update check's result in words; empty before the first check.
+    in property <string> update-text;
+    /// A newer version that can be installed ("v0.4.0"); empty = no install button.
+    in property <string> update-tag;
+    /// A check or an install is running (the buttons wait).
+    in property <bool> update-busy;
+    callback check-update();
+    callback install-update();
     in property <string> data-folder;
 
     // layout editor state (all set from Rust)
@@ -561,6 +569,18 @@ export component SettingsWindow inherits Window {
                                 Text { text: "Version \{root.version}"; color: #909090; }
                             }
                         }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Button { text: "Check for updates"; enabled: !root.update-busy; clicked => { root.check-update(); } }
+                            if root.update-tag != "": Button {
+                                text: "Update to \{root.update-tag}";
+                                primary: true;
+                                enabled: !root.update-busy;
+                                clicked => { root.install-update(); }
+                            }
+                        }
+                        if root.update-text != "": Text { text: root.update-text; wrap: word-wrap; color: #909090; }
                         Text {
                             wrap: word-wrap;
                             text: "A tiny EXP tracker for MapleStory Classic World. It only looks at your screen: it never touches the game's files or memory, and never sends input.";

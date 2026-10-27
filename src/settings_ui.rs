@@ -660,6 +660,68 @@ pub fn run() {
         }
     });
 
+    // updates: the check and the download run on their own thread, so the window keeps drawing meanwhile
+    let found = std::sync::Arc::new(std::sync::Mutex::new(None::<maple_exp::update::Release>));
+    ui.on_check_update({
+        let ui = ui.as_weak();
+        let found = found.clone();
+        move || {
+            let ui = ui.unwrap();
+            ui.set_update_busy(true);
+            ui.set_update_tag("".into());
+            ui.set_update_text("Checking...".into());
+            let (weak, found) = (ui.as_weak(), found.clone());
+            std::thread::spawn(move || {
+                let result = crate::updater::check();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_update_busy(false);
+                    match result {
+                        Ok(Some(rel)) => {
+                            ui.set_update_text(format!("Version {} is available.", rel.tag).into());
+                            ui.set_update_tag(rel.tag.clone().into());
+                            *found.lock().unwrap() = Some(rel);
+                        }
+                        Ok(None) => ui.set_update_text(format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")).into()),
+                        Err(e) => ui.set_update_text(format!("Couldn't check for updates: {e}").into()),
+                    }
+                });
+            });
+        }
+    });
+    ui.on_install_update({
+        let ui = ui.as_weak();
+        let found = found.clone();
+        move || {
+            let Some(rel) = found.lock().unwrap().clone() else { return };
+            let ui = ui.unwrap();
+            ui.set_update_busy(true);
+            ui.set_update_text(format!("Downloading {}...", rel.tag).into());
+            let weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let result = crate::updater::install(&rel);
+                if let Ok(exe) = &result {
+                    crate::updater::restart_overlay(exe);
+                }
+                let _ = weak.upgrade_in_event_loop(move |ui| match result {
+                    Ok(_) => {
+                        ui.set_update_tag("".into());
+                        ui.set_update_text(
+                            format!("Updated to {}. The overlay restarted with it; this window closes now.", rel.tag).into(),
+                        );
+                        // (this window is still the old version: close it so the next one opened is the new one)
+                        slint::Timer::single_shot(Duration::from_millis(2500), || {
+                            let _ = slint::quit_event_loop();
+                        });
+                    }
+                    Err(e) => {
+                        ui.set_update_busy(false);
+                        ui.set_update_text(format!("The update wasn't installed: {e}").into());
+                    }
+                });
+            });
+        }
+    });
+
     ui.on_open_folder(|| {
         if let Some(d) = config::dir() {
             let _ = std::fs::create_dir_all(&d);

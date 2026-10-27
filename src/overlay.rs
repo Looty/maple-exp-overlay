@@ -1129,6 +1129,7 @@ pub fn run() {
             return;
         }
         system::refresh_autostart();
+        crate::updater::clean_up();
         let s = Settings::load();
         let hinst = GetModuleHandleW(null());
         let class = wide(CLASS);

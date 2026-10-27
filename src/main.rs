@@ -26,6 +26,8 @@ mod settings_ui;
 #[cfg(windows)]
 mod system;
 #[cfg(windows)]
+mod updater;
+#[cfg(windows)]
 mod wgc;
 
 #[cfg(windows)]

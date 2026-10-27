@@ -8,3 +8,4 @@ pub mod exp_table;
 pub mod reader;
 pub mod text;
 pub mod tracker;
+pub mod update;
