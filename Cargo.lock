@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "maple-exp-overlay"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "minisign-verify",
  "png 0.17.16",
