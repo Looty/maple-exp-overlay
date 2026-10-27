@@ -289,8 +289,8 @@ fn font_index(fonts: &[String], name: &str) -> i32 {
     fonts.iter().position(|f| f.eq_ignore_ascii_case(name)).map_or(0, |i| i as i32)
 }
 
-/// A second launch just brings the open settings window forward.
-fn focus_existing() {
+/// Brings this process's own settings window to the front (also over a borderless-fullscreen game).
+fn focus_own() {
     unsafe {
         let h = FindWindowW(std::ptr::null(), wide(TITLE).as_ptr());
         if !h.is_null() {
@@ -300,9 +300,54 @@ fn focus_existing() {
     }
 }
 
+/// Another settings process is already running. If its window answers, bring it forward and return true (this launch
+/// then has nothing to do). If it is stuck (a blank window that never comes back), or has no window at all, end it
+/// and return false: this launch opens a fresh window instead, so launching again is never a dead end.
+fn take_over_existing() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+    unsafe {
+        // (the other copy may still be starting up: give its window a moment to appear)
+        let mut h = std::ptr::null_mut();
+        for _ in 0..10 {
+            h = FindWindowW(std::ptr::null(), wide(TITLE).as_ptr());
+            if !h.is_null() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if h.is_null() {
+            return false; // no window to bring forward: open one (a rare second window beats nothing opening)
+        }
+        // never call into a hung window directly (that would hang this process too): ask with a time limit first
+        let mut res = 0usize;
+        let answers = SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &mut res) != 0;
+        if answers {
+            ShowWindowAsync(h, SW_RESTORE);
+            SetForegroundWindow(h);
+            RedrawWindow(h, std::ptr::null(), std::ptr::null_mut(), RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+            return true;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, &mut pid);
+        if pid != 0 && pid != std::process::id() {
+            let p = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+            if !p.is_null() {
+                TerminateProcess(p, 1);
+                WaitForSingleObject(p, 2000); // gone before our window opens, so nothing finds the old one by its title
+                CloseHandle(p);
+            }
+        }
+        false
+    }
+}
+
 pub fn run() {
-    if !system::claim("Local\\MapleExpOverlay.Settings") {
-        focus_existing();
+    // (when the claim fails and the old copy is stuck, it is ended and this one carries on: the mutex handle this
+    // process now holds keeps the name taken for the next launch)
+    if !system::claim("Local\\MapleExpOverlay.Settings") && take_over_existing() {
         return;
     }
     let ui = SettingsWindow::new().expect("settings window");
@@ -640,6 +685,6 @@ pub fn run() {
     // the overlay grants that when it starts us)
     ui.show().ok();
     let front = Timer::default();
-    front.start(TimerMode::SingleShot, Duration::from_millis(150), focus_existing);
+    front.start(TimerMode::SingleShot, Duration::from_millis(150), focus_own);
     ui.run().ok();
 }
