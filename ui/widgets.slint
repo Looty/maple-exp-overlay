@@ -1,0 +1,270 @@
+// The settings window's building blocks, in the look of Windows 11 Settings (dark): setting cards, a check box, the
+// sidebar's rows, the page frame.
+
+import { ScrollView } from "std-widgets.slint";
+
+export global Colors {
+    out property <color> window: #202020;
+    out property <color> sidebar: #1f1f1e;
+    out property <color> pane: #272727;
+    out property <color> pane-border: #1c1c1c;
+    out property <color> card: #2d2d2d;
+    out property <color> card-border: #1d1d1d;
+    out property <color> text: #ffffff;
+    out property <color> hint: #9d9d9d;
+    out property <color> accent: #60cdff;
+    out property <color> accent-hover: #4cc2ff;
+    out property <color> nav-text: #c2c0bb;
+    out property <color> nav-selected: #2f2f2d;
+    out property <color> nav-hover: #2a2a28;
+    out property <color> control: #373737;
+    out property <color> control-border: #434343;
+    out property <color> good: #6ccb5f;
+    out property <color> bad: #ff99a4;
+}
+
+/// A setting card. Cards of one group sit 3px apart; only the group's outer corners are rounded.
+export component Card inherits Rectangle {
+    in property <bool> first: true;
+    in property <bool> last: true;
+    background: Colors.card;
+    border-width: 1px;
+    border-color: Colors.card-border;
+    border-top-left-radius: root.first ? 6px : 0px;
+    border-top-right-radius: root.first ? 6px : 0px;
+    border-bottom-left-radius: root.last ? 6px : 0px;
+    border-bottom-right-radius: root.last ? 6px : 0px;
+}
+
+/// A Windows 11 check box: a rounded square, filled with the accent and ticked when checked.
+export component Check inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    opacity: root.enabled ? 1 : 0.4;
+    background: root.checked ? (ta.has-hover ? Colors.accent-hover : Colors.accent) : (ta.has-hover ? #2a2a2a : #1f1f1f);
+    border-width: root.checked ? 0px : 1px;
+    border-color: #9d9d9d;
+    if root.checked: Path {
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: "M2 6.5 L4.5 9 L10 3.5";
+        stroke: black;
+        stroke-width: 1.6px;
+        fill: transparent;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// A setting: its name (and a grey line under it) on the left, the control on the right.
+export component SettingRow inherits Card {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> dim: false; // (greyed: it only applies with another setting on)
+    min-height: root.hint == "" ? 52px : 62px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: root.label; color: root.dim ? Colors.hint : Colors.text; wrap: word-wrap; }
+            if root.hint != "": Text { text: root.hint; color: Colors.hint; font-size: 12px; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                @children
+            }
+        }
+    }
+}
+
+/// A setting that is on or off: the whole card toggles it.
+export component CheckRow inherits Card {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+    min-height: root.hint == "" ? 52px : 62px;
+    row := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(); }
+    }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: root.label; color: root.enabled ? Colors.text : Colors.hint; wrap: word-wrap; }
+            if root.hint != "": Text { text: root.hint; color: Colors.hint; font-size: 12px; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Check {
+                checked: root.checked;
+                enabled: root.enabled;
+                clicked => { root.toggled(); }
+            }
+        }
+    }
+}
+
+/// A group's heading.
+export component Heading inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 14px;
+    padding-bottom: 6px;
+    Text { text: root.text; font-weight: 600; color: Colors.text; }
+}
+
+/// Small grey text, between cards.
+export component Note inherits Text {
+    color: Colors.hint;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+/// A plain button in the Windows 11 look; `primary` is the accent one.
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <color> text-color: root.primary ? black : Colors.text;
+    callback clicked();
+    height: 32px;
+    min-width: label.preferred-width + 28px;
+    border-radius: 4px;
+    opacity: root.enabled ? 1 : 0.45;
+    background: root.primary ? (ta.has-hover ? Colors.accent-hover : Colors.accent) : (ta.has-hover ? #3c3c3c : Colors.control);
+    border-width: root.primary ? 0px : 1px;
+    border-color: Colors.control-border;
+    label := Text {
+        text: root.text;
+        color: root.text-color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// One of a few choices side by side (a segmented control).
+export component Segments inherits HorizontalLayout {
+    in property <[string]> options;
+    in property <int> current;
+    callback picked(int);
+    spacing: 0px;
+    for o[i] in root.options: Rectangle {
+        height: 32px;
+        min-width: t.preferred-width + 28px;
+        background: i == root.current ? Colors.accent : (sta.has-hover ? #3c3c3c : Colors.control);
+        border-width: 1px;
+        border-color: i == root.current ? Colors.accent : Colors.control-border;
+        border-top-left-radius: i == 0 ? 4px : 0px;
+        border-bottom-left-radius: i == 0 ? 4px : 0px;
+        border-top-right-radius: i == root.options.length - 1 ? 4px : 0px;
+        border-bottom-right-radius: i == root.options.length - 1 ? 4px : 0px;
+        t := Text {
+            text: o;
+            color: i == root.current ? black : Colors.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        sta := TouchArea { clicked => { root.picked(i); } }
+    }
+}
+
+/// A row of the sidebar: a line icon (a 16x16 SVG path) and the page's name.
+export component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> selected;
+    callback clicked();
+    // (sized like the rows of Claude's desktop sidebar: 16px text, 20px icons)
+    height: 40px;
+    border-radius: 8px;
+    background: root.selected ? Colors.nav-selected : (ta.has-hover ? Colors.nav-hover : transparent);
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 20px;
+                height: 20px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: root.icon;
+                stroke: root.selected ? white : Colors.nav-text;
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+        }
+        Text {
+            text: root.label;
+            font-size: 16px;
+            color: root.selected ? white : Colors.nav-text;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// A page: its title (with an optional button beside it) over its settings, which scroll.
+export component Page inherits VerticalLayout {
+    in property <string> title;
+    in property <string> action; // (the button beside the title; empty = none)
+    callback action-clicked();
+    padding-top: 24px;
+    padding-left: 32px;
+    padding-bottom: 0px;
+    spacing: 16px;
+    HorizontalLayout {
+        padding-right: 32px;
+        spacing: 8px;
+        Text {
+            text: root.title;
+            font-size: 28px;
+            font-weight: 600;
+            color: Colors.text;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        if root.action != "": VerticalLayout {
+            alignment: center;
+            Btn { text: root.action; clicked => { root.action-clicked(); } }
+        }
+    }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            alignment: start;
+            spacing: 3px;
+            padding-right: 32px;
+            padding-bottom: 24px;
+            @children
+        }
+    }
+}

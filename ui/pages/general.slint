@@ -1,0 +1,84 @@
+// General: start-up, tray and taskbar, updates, and the settings folder.
+
+import { Btn, CheckRow, Colors, Heading, Page, SettingRow } from "../widgets.slint";
+import { Cfg } from "../types.slint";
+
+export component GeneralPage inherits Page {
+    in-out property <Cfg> cfg;
+    in property <string> data-folder;
+    callback changed();
+    callback open-folder();
+    callback reset-all();
+    /// "Reset..." was clicked once: the next click resets
+    property <bool> armed;
+    title: "General";
+
+    Heading { text: "Startup and tray"; }
+    CheckRow {
+        first: true;
+        last: false;
+        label: "Start with Windows";
+        hint: "Runs when you sign in";
+        checked: root.cfg.autostart;
+        toggled => { root.cfg.autostart = !root.cfg.autostart; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Start hidden";
+        hint: "Tray icon only, until you show it";
+        checked: root.cfg.start-hidden;
+        toggled => { root.cfg.start-hidden = !root.cfg.start-hidden; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Tray icon";
+        hint: "Also your way back to these settings";
+        checked: root.cfg.tray;
+        toggled => { root.cfg.tray = !root.cfg.tray; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Taskbar button";
+        hint: "Show the overlay on the taskbar";
+        checked: root.cfg.taskbar;
+        toggled => { root.cfg.taskbar = !root.cfg.taskbar; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: true;
+        label: "Check for updates automatically";
+        hint: "When this window opens; a new version is downloaded and checked, then waits for Relaunch to update";
+        checked: root.cfg.update-check;
+        toggled => { root.cfg.update-check = !root.cfg.update-check; root.changed(); }
+    }
+
+    Heading { text: "Data"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Settings folder";
+        hint: root.data-folder;
+        Btn { text: "Open folder"; clicked => { root.open-folder(); } }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "Reset all settings";
+        hint: root.armed ? "Click again to reset everything" : "Back to the defaults; the EXP area must be selected again";
+        Btn {
+            text: root.armed ? "Reset now" : "Reset...";
+            text-color: Colors.bad;
+            clicked => {
+                if root.armed {
+                    root.armed = false;
+                    root.reset-all();
+                } else {
+                    root.armed = true;
+                }
+            }
+        }
+    }
+}

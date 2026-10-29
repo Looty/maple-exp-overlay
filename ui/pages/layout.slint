@@ -1,0 +1,170 @@
+// Layout: what the overlay shows and where. The editor shows each piece of data as a chip in the overlay's own colours
+// and font; the card under it changes the selected one.
+
+import { Btn, Card, Check, CheckRow, Colors, Heading, Note, Page, SettingRow } from "../widgets.slint";
+import { Cfg, Chip } from "../types.slint";
+
+export component LayoutPage inherits Page {
+    in property <Cfg> cfg;
+    in property <string> font-name;
+    in property <[string]> layouts;
+    in property <[Chip]> chips;
+    in property <length> editor-h;
+    in property <length> chip-font;
+    in property <bool> dragging;
+    in property <Chip> ghost;
+    in property <length> caret-x;
+    in property <length> caret-y;
+    in property <length> caret-w;
+    in property <length> caret-h;
+    in property <length> newrow-y;
+    /// the colours an item can take (the first three are the theme's)
+    in property <[color]> palette;
+    // the selected item
+    in property <bool> has-selection;
+    in property <string> selected-name;
+    in property <bool> selected-shown;
+    in property <bool> selected-fill;
+    in property <int> selected-tone;
+    callback layout-picked(int);
+    callback drag-down(length, length);
+    callback drag-move(length, length);
+    callback drag-up(length, length);
+    callback chip-right-click(length, length) -> bool;
+    callback color-picked(int);
+    callback fill-toggled();
+    callback show-toggled();
+    title: "Layout";
+
+    SettingRow {
+        label: "Start from a preset";
+        hint: "Replaces the layout below";
+        for name[i] in root.layouts: Btn { text: name; clicked => { root.layout-picked(i); } }
+    }
+
+    // the editor
+    Rectangle {
+        height: root.editor-h;
+        border-radius: 6px;
+        background: root.cfg.bg;
+        border-width: 1px;
+        border-color: Colors.card-border;
+        clip: true;
+
+        for c in root.chips: Rectangle {
+            x: c.x;
+            y: c.y;
+            width: c.w;
+            height: c.h;
+            border-radius: 5px;
+            background: c.shown ? #ffffff12 : transparent;
+            border-width: c.selected ? 2px : 1px;
+            border-color: c.selected ? Colors.accent : c.shown ? c.color.with-alpha(0.55) : #88888870;
+            opacity: root.dragging && c.label == root.ghost.label ? 0.25 : 1;
+            Text {
+                x: 10px;
+                width: parent.width - 14px;
+                height: parent.height;
+                text: c.label;
+                color: c.color;
+                opacity: c.shown ? 1 : 0.4;
+                font-size: root.chip-font;
+                font-family: root.font-name;
+                font-weight: root.cfg.bold ? 700 : 400;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        if root.dragging: Text {
+            x: 12px;
+            y: root.newrow-y;
+            text: "drop here for a new row";
+            color: Colors.hint;
+            font-size: 13px;
+        }
+        if root.dragging: Rectangle {
+            x: root.caret-x;
+            y: root.caret-y;
+            width: root.caret-w;
+            height: root.caret-h;
+            border-radius: 1px;
+            background: Colors.accent;
+        }
+        if root.dragging: Rectangle {
+            x: root.ghost.x;
+            y: root.ghost.y;
+            width: root.ghost.w;
+            height: root.ghost.h;
+            border-radius: 5px;
+            background: #60cdff40;
+            border-width: 1px;
+            border-color: Colors.accent;
+            Text {
+                x: 10px;
+                height: parent.height;
+                text: root.ghost.label;
+                color: root.ghost.color;
+                font-size: root.chip-font;
+                font-family: root.font-name;
+                font-weight: root.cfg.bold ? 700 : 400;
+                vertical-alignment: center;
+            }
+        }
+
+        TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.drag-down(self.mouse-x, self.mouse-y);
+                } else if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                    root.chip-right-click(self.mouse-x, self.mouse-y);
+                } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                    root.drag-up(self.mouse-x, self.mouse-y);
+                }
+            }
+            moved => { root.drag-move(self.mouse-x, self.mouse-y); }
+        }
+    }
+    Note {
+        text: "Drag to move · drop between rows for a new row · click to show or hide (and select) · right-click to select only";
+    }
+
+    Heading { text: root.has-selection ? "Selected: " + root.selected-name : "Selected item"; }
+    if !root.has-selection: Card {
+        min-height: 52px;
+        HorizontalLayout {
+            padding-left: 16px;
+            Text { text: "Click or right-click an item above to change it here."; color: Colors.hint; vertical-alignment: center; }
+        }
+    }
+    if root.has-selection: CheckRow {
+        first: true;
+        last: false;
+        label: "Show";
+        checked: root.selected-shown;
+        toggled => { root.show-toggled(); }
+    }
+    if root.has-selection: CheckRow {
+        first: false;
+        last: false;
+        label: "Fill the row";
+        hint: "Take the room the row leaves (the graph's bars widen; text pushes what follows to the right)";
+        checked: root.selected-fill;
+        toggled => { root.fill-toggled(); }
+    }
+    if root.has-selection: SettingRow {
+        first: false;
+        last: true;
+        label: "Colour";
+        hint: "The first three follow the theme";
+        for c[i] in root.palette: Rectangle {
+            width: 22px;
+            height: 22px;
+            border-radius: 4px;
+            background: c;
+            border-width: i == root.selected-tone ? 2px : 0px;
+            border-color: Colors.accent;
+            TouchArea { mouse-cursor: pointer; clicked => { root.color-picked(i); } }
+        }
+    }
+}

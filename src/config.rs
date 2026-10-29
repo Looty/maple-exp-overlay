@@ -72,6 +72,9 @@ pub struct Settings {
     /// The box around the EXP text, (x, y, w, h) in screen pixels. The user draws it (Settings > Capture > Select area);
     /// until then nothing is read.
     pub region: Option<[i32; 4]>,
+    /// The box around the map name in the minimap's header, (x, y, w, h) in screen pixels (Settings > Capture > Select
+    /// map area). None: the map isn't looked at.
+    pub map_region: Option<[i32; 4]>,
     /// Milliseconds between looks at the bar while the game is running.
     pub poll_ms: i32,
     /// The old setting, in whole seconds. Only read, to carry a slower choice over to `poll_ms`; never written back.
@@ -95,6 +98,8 @@ pub struct Settings {
     // ---- general
     /// Start with the overlay hidden (tray only).
     pub start_hidden: bool,
+    /// The settings window looks for a new version when it opens, and gets it ready to install.
+    pub update_check: bool,
 }
 
 /// The fastest the bar is looked at.
@@ -131,6 +136,7 @@ impl Default for Settings {
             window_min: 5,
             capture: CaptureMode::Screen,
             region: None,
+            map_region: None,
             poll_ms: 250,
             poll_secs: 0,
             anim_count: false,
@@ -139,6 +145,7 @@ impl Default for Settings {
             anim_rainbow: false,
             anim_rainbow_min: 30,
             start_hidden: false,
+            update_check: true,
         }
     }
 }
@@ -154,15 +161,19 @@ pub struct Item {
     pub newline: bool,
     /// 0 = main colour, 1 = normal text, 2 = status colour, 3 and up = a fixed colour from `PALETTE`.
     pub tone: u8,
+    /// Takes the room its row leaves, up to the widest row (shared with the row's other `fill` items); what follows
+    /// it moves to the right. The graph's bars widen; text stays on the left of its room.
+    pub fill: bool,
 }
 
 impl Default for Item {
     fn default() -> Self {
-        Item { id: String::new(), show: false, newline: true, tone: 1 }
+        Item { id: String::new(), show: false, newline: true, tone: 1, fill: false }
     }
 }
 
-pub const ITEM_IDS: [&str; 10] = ["exp_hr", "pct_hr", "exp_window", "eta", "level", "pct", "exp_now", "gained", "gained_pct", "elapsed"];
+pub const ITEM_IDS: [&str; 12] =
+    ["exp_hr", "pct_hr", "exp_window", "eta", "level", "pct", "exp_now", "gained", "gained_pct", "elapsed", "spark", "map"];
 
 /// Colours an item can have besides the three theme colours (tones 0 to 2): tone 3 + index.
 pub const PALETTE: [&str; 10] =
@@ -192,12 +203,14 @@ pub fn item_name(id: &str) -> &'static str {
         "gained" => "EXP gained",
         "gained_pct" => "% gained",
         "elapsed" => "Time farmed",
+        "spark" => "EXP/h graph",
+        "map" => "Map",
         _ => "",
     }
 }
 
 fn item(id: &str, show: bool, newline: bool, tone: u8) -> Item {
-    Item { id: id.into(), show, newline, tone }
+    Item { id: id.into(), show, newline, tone, fill: id == "spark" }
 }
 
 /// The original look: EXP/h; recent rate + time to level; current %.
@@ -213,6 +226,8 @@ pub fn layout_default() -> Vec<Item> {
         item("gained", false, true, 1),
         item("gained_pct", false, false, 1),
         item("elapsed", false, false, 1),
+        item("spark", false, false, 2),
+        item("map", false, true, 2),
     ]
 }
 
@@ -334,9 +349,11 @@ impl Settings {
             first.newline = true;
         }
         self.items = items;
-        if let Some([_, _, w, h]) = self.region {
-            if w < 20 || h < 8 {
-                self.region = None;
+        for region in [&mut self.region, &mut self.map_region] {
+            if let Some([_, _, w, h]) = *region {
+                if w < 20 || h < 8 {
+                    *region = None;
+                }
             }
         }
     }

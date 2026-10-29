@@ -1,5 +1,6 @@
 //! `--select-area`: a dimmed full-screen layer to drag a box on, over the EXP text (with the "EXP." label). Runs as its
-//! own short process (started from the settings window) and saves the box into the settings file.
+//! own short process (started from the settings window) and saves the box into the settings file. `--select-map` is
+//! the same for the map name in the minimap's header.
 
 use crate::system::wide;
 use maple_exp::config::Settings;
@@ -16,8 +17,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 type Drag = ((i32, i32), (i32, i32), bool);
 
 thread_local!(static SEL: RefCell<Drag> = const { RefCell::new(((0, 0), (0, 0), false)) });
+// picking the map name's box rather than the EXP text's
+thread_local!(static FOR_MAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 
-pub fn run() {
+pub fn run(for_map: bool) {
+    FOR_MAP.with(|m| m.set(for_map));
     unsafe {
         let hinst = GetModuleHandleW(null());
         let class = wide("MapleExpSelector");
@@ -90,7 +94,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 DestroyWindow(hwnd);
                 if dragging && r - l >= 20 && bt - t >= 8 {
                     let mut s = Settings::load();
-                    s.region = Some([vx + l, vy + t, r - l, bt - t]);
+                    let area = Some([vx + l, vy + t, r - l, bt - t]);
+                    if FOR_MAP.with(|m| m.get()) {
+                        s.map_region = area;
+                    } else {
+                        s.region = area;
+                    }
                     s.save();
                 }
                 0
@@ -111,7 +120,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 DeleteObject(black);
                 SetBkMode(dc, TRANSPARENT as i32);
                 SetTextColor(dc, 0x00ffffff);
-                let hint: Vec<u16> = "Drag a box around the EXP text (include the 'EXP.' label). Esc cancels.".encode_utf16().collect();
+                let hint = if FOR_MAP.with(|m| m.get()) {
+                    "Drag a box around the map name at the top of the minimap (both lines of text, not the icon). Esc cancels."
+                } else {
+                    "Drag a box around the EXP text (include the 'EXP.' label). Esc cancels."
+                };
+                let hint: Vec<u16> = hint.encode_utf16().collect();
                 TextOutW(dc, 24, 24, hint.as_ptr(), hint.len() as i32);
                 let (a, b, dragging) = SEL.with(|s| *s.borrow());
                 if dragging {

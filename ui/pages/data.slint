@@ -1,0 +1,73 @@
+// Data: how the numbers are shown and counted.
+
+import { ComboBox, SpinBox } from "std-widgets.slint";
+import { CheckRow, Heading, Page, SettingRow } from "../widgets.slint";
+import { Cfg } from "../types.slint";
+
+export component DataPage inherits Page {
+    in-out property <Cfg> cfg;
+    callback changed();
+    title: "Data";
+
+    Heading { text: "Numbers"; }
+    CheckRow {
+        first: true;
+        last: false;
+        label: "Short numbers";
+        hint: "21.1K instead of 21,100";
+        checked: root.cfg.short-numbers;
+        toggled => { root.cfg.short-numbers = !root.cfg.short-numbers; root.changed(); }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "Time to level uses";
+        hint: "The recent pace reacts faster; the session average is steadier";
+        ComboBox {
+            width: 230px;
+            model: ["Recent rate", "Whole session average"];
+            current-index: root.cfg.eta-recent ? 0 : 1;
+            selected(v) => { root.cfg.eta-recent = self.current-index == 0; root.changed(); }
+        }
+    }
+
+    Heading { text: "Sessions and pauses"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Pause after";
+        hint: "Seconds without EXP: the clock stops, so breaks don't lower EXP/h";
+        SpinBox { width: 110px; minimum: 5; maximum: 300; value: root.cfg.idle-secs; edited(v) => { root.cfg.idle-secs = v; root.changed(); } }
+    }
+    SettingRow {
+        first: false;
+        last: false;
+        label: "Recent rate covers";
+        hint: "Minutes: the window for the recent EXP rate";
+        SpinBox { width: 110px; minimum: 1; maximum: 60; value: root.cfg.window-min; edited(v) => { root.cfg.window-min = v; root.changed(); } }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "New session after a break";
+        hint: "Gained, EXP/h, time farmed and time to level start over when you come back";
+        checked: root.cfg.new-session-idle;
+        toggled => { root.cfg.new-session-idle = !root.cfg.new-session-idle; root.changed(); }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "A break is";
+        hint: "Seconds without EXP";
+        dim: !root.cfg.new-session-idle;
+        SpinBox {
+            width: 110px;
+            enabled: root.cfg.new-session-idle;
+            minimum: 30;
+            maximum: 7200;
+            step-size: 30;
+            value: root.cfg.new-session-secs;
+            edited(v) => { root.cfg.new-session-secs = Math.max(30, Math.round(v / 30) * 30); root.changed(); }
+        }
+    }
+}

@@ -1,0 +1,199 @@
+// Overlay: how it looks (theme, colours, font, opacity) and how its window behaves.
+
+import { ComboBox, LineEdit, Slider, SpinBox } from "std-widgets.slint";
+import { Btn, Card, Check, CheckRow, Colors, Heading, Page, SettingRow } from "../widgets.slint";
+import { Cfg, PreviewRow } from "../types.slint";
+
+export component OverlayPage inherits Page {
+    in-out property <Cfg> cfg;
+    in property <[string]> themes;
+    in property <[string]> fonts;
+    in property <int> font-index;
+    in property <string> font-name;
+    callback changed();
+    callback theme-picked(int);
+    callback font-picked(string);
+    callback hex-edited(int, string);
+    callback reset-position();
+    /// the layout's shown items, row by row (see `preview_rows` in settings_ui.rs)
+    in property <[PreviewRow]> preview;
+    /// which colour's code is being edited below the swatches (-1: none)
+    property <int> editing: -1;
+    // the overlay's font size in pixels (points at 96 dpi), and its padding
+    property <length> px: root.cfg.font-size * 1.333px;
+    property <length> pad: 8px;
+    title: "Overlay";
+
+    // a small copy of the overlay, in its colours and font
+    Card {
+        HorizontalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            spacing: 16px;
+            // the layout's shown items, row by row, as the overlay lays them out (sample numbers)
+            Rectangle {
+                width: preview.preferred-width + 2 * root.pad;
+                height: preview.preferred-height + 2 * root.pad;
+                border-radius: 4px;
+                background: root.cfg.bg;
+                opacity: root.cfg.opacity / 100;
+                preview := VerticalLayout {
+                    x: root.pad;
+                    y: root.pad;
+                    // (its own size: left unset, it would take the whole box below the top padding)
+                    width: self.preferred-width;
+                    height: self.preferred-height;
+                    for row in root.preview: HorizontalLayout {
+                        // (the overlay puts about three letters' width between pieces; a filling piece takes the
+                        // room its row leaves, up to the widest row)
+                        spacing: root.px * 0.55 * 3;
+                        alignment: row.fill ? LayoutAlignment.stretch : LayoutAlignment.start;
+                        for p in row.items: HorizontalLayout {
+                            horizontal-stretch: p.fill ? 1 : 0;
+                            if !p.bars: Text {
+                                text: p.text;
+                                color: p.color;
+                                font-family: root.font-name;
+                                font-size: root.px;
+                                font-weight: root.cfg.bold ? 700 : 400;
+                                vertical-alignment: center;
+                            }
+                            // the EXP/h graph: 30 thin bars on the text's baseline (a made-up trend)
+                            if p.bars: HorizontalLayout {
+                                min-width: 30 * 3px;
+                                spacing: 1px;
+                                alignment: stretch;
+                                for i in 30: VerticalLayout {
+                                    alignment: end;
+                                    padding-bottom: root.px * 0.2;
+                                    Rectangle {
+                                        min-width: 2px;
+                                        horizontal-stretch: 1;
+                                        height: root.px * 0.72 * (0.25 + 0.75 * abs(sin(i * 23deg) * cos(i * 7deg)));
+                                        background: i == 29 ? root.cfg.accent : p.color;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text { text: "Preview"; color: Colors.text; }
+                Text { text: "Updates as you change settings"; color: Colors.hint; font-size: 12px; }
+            }
+        }
+    }
+
+    Heading { text: "Look"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Colour theme";
+        ComboBox { width: 200px; model: root.themes; selected(v) => { root.theme-picked(self.current-index); } }
+    }
+    SettingRow {
+        first: false;
+        last: root.editing < 0;
+        label: "Colours";
+        hint: "Background · main · text · status: click one to change it";
+        for c[i] in [root.cfg.bg, root.cfg.accent, root.cfg.text-color, root.cfg.dim]: Rectangle {
+            width: 26px;
+            height: 26px;
+            border-radius: 4px;
+            background: c;
+            border-width: root.editing == i ? 2px : 1px;
+            border-color: root.editing == i ? Colors.accent : #555555;
+            TouchArea { mouse-cursor: pointer; clicked => { root.editing = root.editing == i ? -1 : i; } }
+        }
+    }
+    if root.editing >= 0: SettingRow {
+        first: false;
+        last: false;
+        label: ["Background", "Main colour", "Normal text", "Status text"][root.editing] + " colour";
+        hint: "A colour code, like #ffd455";
+        LineEdit {
+            width: 130px;
+            text: [root.cfg.bg-hex, root.cfg.accent-hex, root.cfg.text-hex, root.cfg.dim-hex][root.editing];
+            edited(t) => { root.hex-edited(root.editing, t); }
+        }
+        Btn { text: "Done"; clicked => { root.editing = -1; } }
+    }
+    SettingRow {
+        first: false;
+        last: false;
+        label: "Font";
+        ComboBox { width: 170px; model: root.fonts; current-index: root.font-index; selected(v) => { root.font-picked(v); } }
+        SpinBox { width: 90px; minimum: 7; maximum: 40; value: root.cfg.font-size; edited(v) => { root.cfg.font-size = v; root.changed(); } }
+        // bold: a toggle button, lit when on
+        Rectangle {
+            width: 36px;
+            height: 32px;
+            border-radius: 4px;
+            background: root.cfg.bold ? Colors.accent : (bold-ta.has-hover ? #3c3c3c : Colors.control);
+            border-width: root.cfg.bold ? 0px : 1px;
+            border-color: Colors.control-border;
+            Text { text: "B"; font-weight: 700; color: root.cfg.bold ? black : Colors.text; horizontal-alignment: center; vertical-alignment: center; }
+            bold-ta := TouchArea { mouse-cursor: pointer; clicked => { root.cfg.bold = !root.cfg.bold; root.changed(); } }
+        }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "Opacity";
+        op := Slider { width: 180px; minimum: 20; maximum: 100; value: root.cfg.opacity; released(v) => { root.cfg.opacity = round(v); root.changed(); } }
+        // (follows the handle while it is dragged, before anything is saved)
+        Text { text: "\{round(op.value)}%"; color: Colors.text; min-width: 40px; horizontal-alignment: right; vertical-alignment: center; }
+    }
+
+    Heading { text: "Window"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Position";
+        hint: "Drag the overlay to move it, or type where it goes";
+        SpinBox { width: 100px; minimum: -10000; maximum: 20000; value: root.cfg.pos-x; edited(v) => { root.cfg.pos-x = v; root.changed(); } }
+        SpinBox { width: 100px; minimum: -10000; maximum: 20000; value: root.cfg.pos-y; edited(v) => { root.cfg.pos-y = v; root.changed(); } }
+        Btn { text: "Reset"; clicked => { root.reset-position(); } }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Always on top";
+        checked: root.cfg.topmost;
+        toggled => { root.cfg.topmost = !root.cfg.topmost; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Click-through";
+        hint: "Clicks go to the game; use the tray to get back here";
+        checked: root.cfg.locked;
+        toggled => { root.cfg.locked = !root.cfg.locked; root.changed(); }
+    }
+    CheckRow {
+        first: false;
+        last: false;
+        label: "Hide when idle";
+        hint: "Back with the next EXP";
+        checked: root.cfg.hide-idle;
+        toggled => { root.cfg.hide-idle = !root.cfg.hide-idle; root.changed(); }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "Hide after";
+        hint: "Seconds without EXP";
+        dim: !root.cfg.hide-idle;
+        SpinBox {
+            width: 110px;
+            enabled: root.cfg.hide-idle;
+            minimum: 5;
+            maximum: 3600;
+            step-size: 5;
+            value: root.cfg.hide-after;
+            edited(v) => { root.cfg.hide-after = Math.max(5, Math.round(v / 5) * 5); root.changed(); }
+        }
+    }
+}

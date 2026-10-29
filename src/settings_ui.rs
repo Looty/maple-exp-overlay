@@ -6,11 +6,14 @@ use crate::capture::grab;
 use crate::system::{self, wide};
 use maple_exp::config::{self, parse_hex, CaptureMode, Settings, LAYOUTS, THEMES};
 use maple_exp::editor::{self, Geo};
-use maple_exp::reader::{diagnose, find_and_read, Reading, Templates};
+use maple_exp::map::{self, Maps};
+use maple_exp::reader::{diagnose, find_and_read, Frame, Reading, Templates};
 use maple_exp::text::commas;
+use maple_exp::update::Release;
 use slint::{ComponentHandle, ModelRc, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -18,7 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 slint::include_modules!();
 
 const POLL_MS: [i32; 4] = [250, 500, 750, 1000];
-const TITLE: &str = "Maple EXP Overlay - Settings";
+pub const TITLE: &str = "Maple EXP Overlay - Settings";
 
 type Shared = Rc<RefCell<Settings>>;
 
@@ -28,10 +31,33 @@ fn color(hex: &str) -> slint::Color {
 }
 
 fn region_text(s: &Settings) -> String {
-    match s.region {
+    area_text(s.region)
+}
+
+fn area_text(area: Option<[i32; 4]>) -> String {
+    match area {
         Some([x, y, w, h]) => format!("{w} x {h} at {x}, {y}"),
         None => "Not selected yet".to_string(),
     }
+}
+
+fn to_image(f: &Frame) -> slint::Image {
+    let mut px = SharedPixelBuffer::<slint::Rgba8Pixel>::new(f.w as u32, f.h as u32);
+    for (dst, src) in px.make_mut_slice().iter_mut().zip(f.bgra.chunks_exact(4)) {
+        *dst = slint::Rgba8Pixel { r: src[2], g: src[1], b: src[0], a: 255 };
+    }
+    slint::Image::from_rgba8(px)
+}
+
+/// The Map part of the Capture tab: the area, and the maps read so far (the newest last).
+fn show_map(ui: &SettingsWindow, s: &Settings) {
+    let maps = Maps::load();
+    ui.set_map_region_text(area_text(s.map_region).into());
+    ui.set_hdr(crate::capture::hdr_on() == Some(true));
+    ui.set_map_count(maps.names.len() as i32);
+    let mut read: Vec<String> = maps.names.values().chain(maps.guesses.values()).map(|t| t.replace('\n', ": ")).collect();
+    read.sort();
+    ui.set_maps_read(read.join("\n").into());
 }
 
 /// Changes the settings and saves. The file is read again first: the overlay saves its position when it is dragged and
@@ -82,8 +108,10 @@ fn to_cfg(s: &Settings) -> Cfg {
         anim_pop: s.anim_pop,
         anim_snail: s.anim_snail,
         anim_rainbow: s.anim_rainbow,
+        rainbow_min: s.anim_rainbow_min,
         autostart: system::autostart_enabled(),
         start_hidden: s.start_hidden,
+        update_check: s.update_check,
     }
 }
 
@@ -110,7 +138,9 @@ fn from_cfg(s: &mut Settings, c: &Cfg) {
     s.anim_pop = c.anim_pop;
     s.anim_snail = c.anim_snail;
     s.anim_rainbow = c.anim_rainbow;
+    s.anim_rainbow_min = c.rainbow_min;
     s.start_hidden = c.start_hidden;
+    s.update_check = c.update_check;
 }
 
 fn installed_fonts() -> Vec<String> {
@@ -159,22 +189,80 @@ fn palette(s: &Settings) -> Vec<slint::Color> {
     (0..config::TONES).map(|t| tone_color(s, t)).collect()
 }
 
-/// The chips (and the editor's size) for the current items, font and colours.
+/// The chips (and the editor's size) for the current items, font and colours, and the "Selected item" card.
 fn rebuild_chips(ui: &SettingsWindow, s: &Settings) {
     let g = Geo::new(s.font_size);
     let (placed, height) = editor::place(&s.items, &g);
+    let selected = ui.get_selected_id();
     let chips: Vec<Chip> = placed
         .iter()
         .map(|p| {
             let it = &s.items[p.idx];
-            Chip { label: editor::sample(&it.id).into(), x: p.x, y: p.y, w: p.w, h: p.h, color: tone_color(s, it.tone), shown: it.show }
+            Chip {
+                label: editor::sample(&it.id).into(),
+                x: p.x,
+                y: p.y,
+                w: p.w,
+                h: p.h,
+                color: tone_color(s, it.tone),
+                shown: it.show,
+                selected: it.id == selected.as_str(),
+            }
         })
         .collect();
     ui.set_chips(ModelRc::new(VecModel::from(chips)));
+    ui.set_preview(ModelRc::new(VecModel::from(preview_rows(s))));
     ui.set_palette(ModelRc::new(VecModel::from(palette(s))));
     ui.set_editor_h(height);
     ui.set_chip_font(g.font_px);
     ui.set_dragging(false);
+    // (the selected item is kept by id: its place in the list changes when chips are dragged)
+    match s.items.iter().find(|it| it.id == selected.as_str()) {
+        Some(it) => {
+            ui.set_has_selection(true);
+            ui.set_selected_name(config::item_name(&it.id).into());
+            ui.set_selected_shown(it.show);
+            ui.set_selected_fill(it.fill);
+            ui.set_selected_tone(it.tone as i32);
+        }
+        None => ui.set_has_selection(false),
+    }
+}
+
+/// The overlay as it would look with sample numbers: the shown items in their rows (an item with `newline` starts a
+/// row, as in the overlay's `build_rows`), colours and fill.
+fn preview_rows(s: &Settings) -> Vec<PreviewRow> {
+    let mut rows: Vec<(Vec<PreviewItem>, bool)> = Vec::new();
+    for it in s.items.iter().filter(|i| i.show) {
+        if it.newline || rows.is_empty() {
+            rows.push((Vec::new(), false));
+        }
+        let row = rows.last_mut().unwrap();
+        row.0.push(PreviewItem {
+            text: editor::sample(&it.id).into(),
+            color: tone_color(s, it.tone),
+            fill: it.fill,
+            bars: it.id == "spark",
+        });
+        row.1 |= it.fill;
+    }
+    if rows.is_empty() {
+        // (everything switched off: the overlay shows its name, never an empty box)
+        let text = config::APP_NAME.into();
+        rows.push((vec![PreviewItem { text, color: tone_color(s, 2), fill: false, bars: false }], false));
+    }
+    rows.into_iter().map(|(items, fill)| PreviewRow { items: ModelRc::new(VecModel::from(items)), fill }).collect()
+}
+
+/// Changes the selected item (see `rebuild_chips`) and saves.
+fn edit_selected(ui: &SettingsWindow, settings: &Shared, f: impl FnOnce(&mut config::Item)) {
+    let id = ui.get_selected_id();
+    edit(settings, |s| {
+        if let Some(it) = s.items.iter_mut().find(|it| it.id == id.as_str()) {
+            f(it);
+        }
+    });
+    rebuild_chips(ui, &settings.borrow());
 }
 
 /// Said under a failed test taken while the game isn't in front.
@@ -227,11 +315,7 @@ fn test_capture(region: [i32; 4], t: &Templates, use_window: bool) -> (Result<Re
     match unsafe { grab(use_window, x, y, w, h) } {
         (None, _) => (Err("The capture failed."), None),
         (Some(f), _) => {
-            let mut px = SharedPixelBuffer::<slint::Rgba8Pixel>::new(f.w as u32, f.h as u32);
-            for (dst, src) in px.make_mut_slice().iter_mut().zip(f.bgra.chunks_exact(4)) {
-                *dst = slint::Rgba8Pixel { r: src[2], g: src[1], b: src[0], a: 255 };
-            }
-            let image = Some(slint::Image::from_rgba8(px));
+            let image = Some(to_image(&f));
             match find_and_read(t, &f) {
                 Some((_, r)) => (Ok(r), image),
                 None => (Err(explain(diagnose(t, &f).split('|').next().unwrap_or(""))), image),
@@ -344,10 +428,110 @@ fn take_over_existing() -> bool {
     }
 }
 
+/// A newer version found by the update check, and its exe once downloaded and checked.
+#[derive(Default)]
+struct PendingUpdate {
+    rel: Option<Release>,
+    exe: Option<Vec<u8>>,
+}
+
+/// Asks GitHub for a newer version and, when there is one, downloads it so it is ready to install. `quiet` (the check
+/// made when the window opens) says nothing unless a new version turns up.
+fn look_for_update(ui: &SettingsWindow, pending: Arc<Mutex<PendingUpdate>>, quiet: bool) {
+    ui.set_update_busy(true);
+    ui.set_update_tag("".into());
+    ui.set_update_ready("".into());
+    if !quiet {
+        ui.set_update_text("Checking...".into());
+    }
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let rel = match crate::updater::check() {
+            Ok(Some(rel)) => rel,
+            result => {
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_update_busy(false);
+                    match result {
+                        _ if quiet => {}
+                        Err(e) => ui.set_update_text(format!("Couldn't check for updates: {e}").into()),
+                        _ => ui.set_update_text(format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")).into()),
+                    }
+                });
+                return;
+            }
+        };
+        pending.lock().unwrap().rel = Some(rel.clone());
+        let tag = rel.tag.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| ui.set_update_text(format!("Version {tag} is available. Getting it ready...").into()));
+        let exe = crate::updater::download(&rel);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_update_busy(false);
+            ui.set_update_tag(rel.tag.clone().into());
+            match exe {
+                Ok(exe) => {
+                    pending.lock().unwrap().exe = Some(exe);
+                    ui.set_update_ready(rel.tag.clone().into());
+                    ui.set_update_text(format!("Version {} is ready. Relaunch to update.", rel.tag).into());
+                }
+                Err(e) => ui.set_update_text(format!("Version {} is available, but the download failed: {e}", rel.tag).into()),
+            }
+        });
+    });
+}
+
+/// `--settings --shot <folder>` (debug builds only): draws every page off-screen, into `page-N.bmp` files, and quits.
+/// Nothing opens on screen and nothing takes the focus, so the window can be checked while the game is in front.
+fn shot_folder() -> Option<std::path::PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::args().skip_while(|a| a != "--shot").nth(1).map(Into::into)
+}
+
+/// A platform with one window that is never shown: the software renderer draws it into memory.
+struct Headless(Rc<slint::platform::software_renderer::MinimalSoftwareWindow>);
+
+impl slint::platform::Platform for Headless {
+    fn create_window_adapter(&self) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Draws each page (with an update waiting and an item selected, so those show too) and saves it.
+fn take_shots(ui: &SettingsWindow, window: &slint::platform::software_renderer::MinimalSoftwareWindow, dir: &std::path::Path) {
+    let (w, h) = (920u32, 760u32);
+    window.set_size(slint::PhysicalSize::new(w, h));
+    if !std::env::args().any(|a| a == "--no-update") {
+        ui.set_update_ready("v0.5.0".into()); // (so the update button is in the pictures; --no-update leaves it out)
+    }
+    let _ = std::fs::create_dir_all(dir);
+    for page in 0..7 {
+        ui.set_page(page);
+        let mut px = vec![slint::Rgb8Pixel::default(); (w * h) as usize];
+        // (a couple of passes: the first lays out what the page change created)
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            window.draw_if_needed(|r| {
+                r.render(&mut px, w as usize);
+            });
+        }
+        let bgra = px.iter().flat_map(|p| [p.b, p.g, p.r, 255]).collect();
+        crate::capture::save_bmp(&dir.join(format!("page-{page}.bmp")), &Frame { w: w as usize, h: h as usize, bgra });
+    }
+}
+
 pub fn run() {
+    let shots = shot_folder();
+    let headless = shots.as_ref().map(|_| {
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let _ = slint::platform::set_platform(Box::new(Headless(window.clone())));
+        window
+    });
     // (when the claim fails and the old copy is stuck, it is ended and this one carries on: the mutex handle this
     // process now holds keeps the name taken for the next launch)
-    if !system::claim("Local\\MapleExpOverlay.Settings") && take_over_existing() {
+    if shots.is_none() && !system::claim("Local\\MapleExpOverlay.Settings") && take_over_existing() {
         return;
     }
     let ui = SettingsWindow::new().expect("settings window");
@@ -370,6 +554,7 @@ pub fn run() {
             ui.set_font_index(font_index(&fonts, &s.font));
             ui.set_font_name(s.font.clone().into());
             ui.set_region_text(region_text(&s).into());
+            show_map(&ui, &s);
             rebuild_chips(&ui, &s);
         }
     };
@@ -380,7 +565,7 @@ pub fn run() {
     ui.set_version(env!("CARGO_PKG_VERSION").into());
     // nothing is read until an area is selected, so a first run opens on the tab where that is done
     if settings.borrow().region.is_none() {
-        ui.set_start_tab(2);
+        ui.set_page(3); // (Capture)
     }
     ui.set_data_folder(config::dir().map(|d| d.display().to_string()).unwrap_or_default().into());
     refresh();
@@ -459,6 +644,7 @@ pub fn run() {
         move |i| {
             if let Some(l) = LAYOUTS.get(i as usize) {
                 edit(&settings, |s| s.items = (l.1)());
+                ui.unwrap().set_selected_id("".into());
                 rebuild_chips(&ui.unwrap(), &settings.borrow());
             }
         }
@@ -515,10 +701,12 @@ pub fn run() {
                 h: p.h,
                 color: tone_color(&s, it.tone),
                 shown: true,
+                selected: false,
             });
             ui.set_caret_x(t.caret.0);
             ui.set_caret_y(t.caret.1);
-            ui.set_caret_h(t.caret.2);
+            ui.set_caret_w(t.caret.2);
+            ui.set_caret_h(t.caret.3);
             ui.set_newrow_y(g.pad + editor::rows(&s.items).len() as f32 * (g.chip_h + g.gap) + g.chip_h * 0.25);
             ui.set_dragging(true);
         }
@@ -536,52 +724,80 @@ pub fn run() {
                 out
             };
             let Some(idx) = item else { return };
+            let ui = ui.unwrap();
             edit(&settings, |s| {
                 if !moved {
+                    // a click: show or hide it, and select it for the card below the editor
                     if let Some(it) = s.items.get_mut(idx) {
                         it.show = !it.show;
+                        ui.set_selected_id(it.id.as_str().into());
                     }
                 } else if let Some(t) = target {
-                    editor::apply_move(&mut s.items, idx, t.row, t.col);
+                    editor::apply_move(&mut s.items, idx, &t);
                 }
             });
-            rebuild_chips(&ui.unwrap(), &settings.borrow());
+            rebuild_chips(&ui, &settings.borrow());
         }
     });
 
-    // right-click a chip: remember which one and let the window open its colour palette (returns whether a chip was hit)
+    // right-click a chip: select it, changing nothing (returns whether a chip was hit)
     ui.on_chip_right_click({
         let settings = settings.clone();
         let ui = ui.as_weak();
-        move |x, y| match chip_at(&settings.borrow(), x, y) {
-            Some((idx, _)) => {
-                ui.unwrap().set_color_target(idx as i32);
-                true
-            }
-            None => false,
+        move |x, y| {
+            let s = settings.borrow();
+            let Some((idx, _)) = chip_at(&s, x, y) else { return false };
+            let ui = ui.unwrap();
+            ui.set_selected_id(s.items[idx].id.as_str().into());
+            rebuild_chips(&ui, &s);
+            true
         }
     });
 
+    ui.on_show_toggled({
+        let settings = settings.clone();
+        let ui = ui.as_weak();
+        move || edit_selected(&ui.unwrap(), &settings, |it| it.show = !it.show)
+    });
+    ui.on_fill_toggled({
+        let settings = settings.clone();
+        let ui = ui.as_weak();
+        move || edit_selected(&ui.unwrap(), &settings, |it| it.fill = !it.fill)
+    });
     ui.on_color_picked({
         let settings = settings.clone();
         let ui = ui.as_weak();
-        move |tone| {
-            let ui = ui.unwrap();
-            let target = ui.get_color_target();
-            if target >= 0 {
-                edit(&settings, |s| {
-                    if let Some(it) = s.items.get_mut(target as usize) {
-                        it.tone = (tone.max(0) as u8).min(config::TONES - 1);
-                    }
-                });
-                rebuild_chips(&ui, &settings.borrow());
-            }
+        move |tone| edit_selected(&ui.unwrap(), &settings, |it| it.tone = (tone.max(0) as u8).min(config::TONES - 1))
+    });
+
+    // Effects > Preview effects: the effects run in the overlay, so ask it
+    ui.on_preview_effects(|| unsafe {
+        let h = FindWindowW(wide(crate::overlay::CLASS).as_ptr(), std::ptr::null());
+        if !h.is_null() {
+            PostMessageW(h, crate::overlay::WM_PREVIEW, 0, 0);
         }
+    });
+    ui.on_open_releases(|| {
+        let url = format!("https://github.com/{}/releases", maple_exp::update::REPO);
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
     });
 
     ui.on_select_area(|| {
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).arg("--select-area").spawn();
+        }
+    });
+    ui.on_select_map(|| {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).arg("--select-map").spawn();
+        }
+    });
+    ui.on_clear_map({
+        let settings = settings.clone();
+        let ui = ui.as_weak();
+        move || {
+            edit(&settings, |s| s.map_region = None);
+            show_map(&ui.unwrap(), &settings.borrow());
         }
     });
 
@@ -653,57 +869,55 @@ pub fn run() {
     ui.on_reset_all({
         let settings = settings.clone();
         let refresh = refresh.clone();
+        let ui = ui.as_weak();
         move || {
             system::set_autostart(false);
             edit(&settings, |s| *s = Settings::default());
+            ui.unwrap().set_selected_id("".into());
             refresh();
         }
     });
 
-    // updates: the check and the download run on their own thread, so the window keeps drawing meanwhile
-    let found = std::sync::Arc::new(std::sync::Mutex::new(None::<maple_exp::update::Release>));
+    // updates: the check and the download run on their own thread, so the window keeps drawing meanwhile. A newer
+    // version is downloaded and checked right away, so "Relaunch to update" only has to swap the exe and restart.
+    let pending = Arc::new(Mutex::new(PendingUpdate::default()));
     ui.on_check_update({
         let ui = ui.as_weak();
-        let found = found.clone();
-        move || {
-            let ui = ui.unwrap();
-            ui.set_update_busy(true);
-            ui.set_update_tag("".into());
-            ui.set_update_text("Checking...".into());
-            let (weak, found) = (ui.as_weak(), found.clone());
-            std::thread::spawn(move || {
-                let result = crate::updater::check();
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_update_busy(false);
-                    match result {
-                        Ok(Some(rel)) => {
-                            ui.set_update_text(format!("Version {} is available.", rel.tag).into());
-                            ui.set_update_tag(rel.tag.clone().into());
-                            *found.lock().unwrap() = Some(rel);
-                        }
-                        Ok(None) => ui.set_update_text(format!("You have the latest version ({}).", env!("CARGO_PKG_VERSION")).into()),
-                        Err(e) => ui.set_update_text(format!("Couldn't check for updates: {e}").into()),
-                    }
-                });
-            });
-        }
+        let pending = pending.clone();
+        move || look_for_update(&ui.unwrap(), pending.clone(), false)
     });
+    if settings.borrow().update_check && !maple_exp::update::PUBLIC_KEY.is_empty() && shots.is_none() {
+        look_for_update(&ui, pending.clone(), true);
+    }
     ui.on_install_update({
         let ui = ui.as_weak();
-        let found = found.clone();
+        let pending = pending.clone();
         move || {
-            let Some(rel) = found.lock().unwrap().clone() else { return };
+            let (Some(rel), staged) = ({
+                let mut p = pending.lock().unwrap();
+                (p.rel.clone(), p.exe.take())
+            }) else {
+                return;
+            };
             let ui = ui.unwrap();
             ui.set_update_busy(true);
-            ui.set_update_text(format!("Downloading {}...", rel.tag).into());
+            ui.set_update_text(match staged {
+                Some(_) => format!("Installing {}...", rel.tag).into(),
+                None => format!("Downloading {}...", rel.tag).into(),
+            });
             let weak = ui.as_weak();
             std::thread::spawn(move || {
-                let result = crate::updater::install(&rel);
+                let exe = match staged {
+                    Some(exe) => Ok(exe),
+                    None => crate::updater::download(&rel),
+                };
+                let result = exe.and_then(|exe| crate::updater::put_in_place(&exe));
                 if let Ok(exe) = &result {
                     crate::updater::restart_overlay(exe);
                 }
                 let _ = weak.upgrade_in_event_loop(move |ui| match result {
                     Ok(_) => {
+                        ui.set_update_ready("".into());
                         ui.set_update_tag("".into());
                         ui.set_update_text(
                             format!("Updated to {}. The overlay restarted with it; this window closes now.", rel.tag).into(),
@@ -715,6 +929,7 @@ pub fn run() {
                     }
                     Err(e) => {
                         ui.set_update_busy(false);
+                        ui.set_update_ready("".into()); // (the About tab's button tries again, downloading afresh)
                         ui.set_update_text(format!("The update wasn't installed: {e}").into());
                     }
                 });
@@ -730,18 +945,29 @@ pub fn run() {
     });
 
     // the area picker runs as another process and writes the file: show its result when it lands
-    let seen = Cell::new(config::modified());
+    // (and so does --read-map, when it has read a map)
+    let seen = Cell::new((config::modified(), map::modified()));
     let watch = Timer::default();
     watch.start(TimerMode::Repeated, Duration::from_millis(600), {
         let ui = ui.as_weak();
         move || {
-            let m = config::modified();
+            let m = (config::modified(), map::modified());
             if m != seen.get() {
                 seen.set(m);
-                ui.unwrap().set_region_text(region_text(&Settings::load()).into());
+                let (ui, s) = (ui.unwrap(), Settings::load());
+                ui.set_region_text(region_text(&s).into());
+                show_map(&ui, &s);
             }
         }
     });
+
+    if let (Some(dir), Some(window)) = (&shots, &headless) {
+        ui.set_selected_id("exp_hr".into());
+        rebuild_chips(&ui, &settings.borrow());
+        ui.show().ok();
+        take_shots(&ui, window, dir);
+        return;
+    }
 
     // come to the front even over a borderless-fullscreen game (a freshly started process isn't allowed to by default;
     // the overlay grants that when it starts us)

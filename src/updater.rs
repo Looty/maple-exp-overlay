@@ -104,16 +104,20 @@ pub fn check() -> Result<Option<Release>, String> {
     Ok(update::is_newer(&rel.tag, env!("CARGO_PKG_VERSION")).then_some(rel))
 }
 
-/// Downloads `rel`, checks its signature, and puts it in place of the running exe. Returns the exe's path.
-pub fn install(rel: &Release) -> Result<PathBuf, String> {
+/// Downloads `rel`'s exe and checks its signature: the new program, ready for `put_in_place`.
+pub fn download(rel: &Release) -> Result<Vec<u8>, String> {
     let exe = http_get(&rel.exe_url, "application/octet-stream")?;
     let sig = http_get(&rel.sig_url, "application/octet-stream")?;
     update::verify(&exe, &String::from_utf8_lossy(&sig), update::PUBLIC_KEY, &rel.tag)?;
+    Ok(exe)
+}
 
+/// Puts a downloaded (and checked) exe in place of the running one. Returns the exe's path.
+pub fn put_in_place(exe: &[u8]) -> Result<PathBuf, String> {
     let cur = std::env::current_exe().map_err(|e| format!("can't find this program's file: {e}"))?;
     let (new, old) = (cur.with_extension("new"), cur.with_extension("old"));
     let denied = |e: std::io::Error| format!("can't write next to the program ({e}); move it to a folder you own, or update by hand");
-    std::fs::write(&new, &exe).map_err(denied)?;
+    std::fs::write(&new, exe).map_err(denied)?;
     let _ = std::fs::remove_file(&old); // (left from the last update, if the overlay hasn't cleared it yet)
     if let Err(e) = std::fs::rename(&cur, &old) {
         let _ = std::fs::remove_file(&new);

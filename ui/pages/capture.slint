@@ -1,0 +1,207 @@
+// Capture: where the EXP bar (and the map name) is read from, and how.
+
+import { ComboBox } from "std-widgets.slint";
+import { Btn, Card, Colors, Heading, Note, Page, Segments, SettingRow } from "../widgets.slint";
+import { Cfg } from "../types.slint";
+
+export component CapturePage inherits Page {
+    in-out property <Cfg> cfg;
+    in property <string> region-text;
+    in property <string> test-text;
+    in property <bool> test-ok;
+    in property <image> test-image;
+    in property <bool> has-test-image;
+    in property <string> test-caption;
+    /// text of the "switch capture method" button the test offers; empty = no button
+    in property <string> switch-label;
+    /// seconds left before "Test in game" looks at the screen; 0 = not counting
+    in property <int> test-countdown;
+    in property <string> map-region-text;
+    in property <int> map-count;
+    in property <string> maps-read;
+    in property <bool> hdr;
+    callback changed();
+    callback select-area();
+    callback test-area();
+    callback test-in-game();
+    callback switch-capture();
+    callback select-map();
+    callback clear-map();
+    property <bool> no-area: root.region-text == "Not selected yet";
+    title: "Capture";
+
+    // how reading goes, and the test
+    Card {
+        first: true;
+        last: root.switch-label == "" && root.test-countdown == 0;
+        HorizontalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 14px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 16px;
+                    background: root.test-ok ? Colors.good : root.test-text == "" ? Colors.control : Colors.bad;
+                    Text {
+                        text: root.test-ok ? "✓" : root.test-text == "" ? "?" : "!";
+                        color: root.test-text == "" && !root.test-ok ? Colors.text : black;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.no-area ? "No EXP area selected yet" : root.test-ok ? "Reading the EXP bar" : root.test-text == "" ? "Not tested yet" : "Can't read the EXP bar";
+                    font-weight: 600;
+                    color: Colors.text;
+                }
+                Text {
+                    text: root.test-text != "" ? root.test-text : root.no-area ? "Select the area first, below." : "Test in game: switch to the game within 5 seconds and leave it in front.";
+                    color: Colors.hint;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Btn { text: "Test now"; enabled: root.test-countdown == 0 && !root.no-area; clicked => { root.test-area(); } }
+                    Btn {
+                        text: root.test-countdown > 0 ? "Testing in \{root.test-countdown} s..." : "Test in game";
+                        primary: true;
+                        enabled: root.test-countdown == 0 && !root.no-area;
+                        clicked => { root.test-in-game(); }
+                    }
+                }
+            }
+        }
+    }
+    if root.test-countdown > 0: Card {
+        first: false;
+        last: root.switch-label == "";
+        min-height: 44px;
+        HorizontalLayout {
+            padding-left: 16px;
+            Text { text: "Switch to the game now and leave it in front..."; color: Colors.accent; font-weight: 600; vertical-alignment: center; }
+        }
+    }
+    if root.switch-label != "": SettingRow {
+        first: false;
+        last: true;
+        label: "Another capture method may see the bar";
+        Btn { text: root.switch-label; primary: true; clicked => { root.switch-capture(); } }
+    }
+
+    Heading { text: "EXP bar area"; }
+    Card {
+        first: true;
+        last: false;
+        HorizontalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 16px;
+            if root.has-test-image: Rectangle {
+                width: 250px;
+                height: 56px;
+                background: #00000040;
+                border-width: 1px;
+                border-color: Colors.accent;
+                Image { source: root.test-image; image-fit: contain; width: parent.width - 4px; height: parent.height - 4px; image-rendering: pixelated; }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text { text: "Selected area"; color: Colors.text; }
+                Text { text: root.region-text; color: Colors.hint; font-size: 12px; }
+                if root.has-test-image: Text { text: root.test-caption; color: Colors.hint; font-size: 12px; wrap: word-wrap; }
+            }
+            VerticalLayout {
+                alignment: center;
+                Btn { text: "Select area..."; primary: root.no-area; clicked => { root.select-area(); } }
+            }
+        }
+    }
+    Card {
+        first: false;
+        last: true;
+        HorizontalLayout {
+            padding: 12px;
+            padding-left: 16px;
+            padding-right: 16px;
+            Note {
+                text: "Start the game (windowed or borderless fullscreen) with the EXP bar visible. Box the \"EXP.\" label and numbers, for example \"EXP. 24,855 [20.25%]\", with a little margin and nothing else (Esc cancels). Test in game, not with this window in front: Windows can show the taskbar over the bar then, which it hides while you play. Select again after moving the game or changing its UI scale.";
+            }
+        }
+    }
+
+    Heading { text: "How it reads"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Capture method";
+        hint: root.cfg.capture-index == 1 ? "The game's own picture: the taskbar or a window on top can't hide the bar" : "What is on your screen, like any screen recorder";
+        Segments {
+            options: ["Screen", "Game window"];
+            current: root.cfg.capture-index;
+            picked(i) => { root.cfg.capture-index = i; root.changed(); }
+        }
+    }
+    SettingRow {
+        first: false;
+        last: true;
+        label: "Look every";
+        hint: "New EXP shows within one look; shorter reacts faster and costs slightly more CPU";
+        ComboBox {
+            width: 120px;
+            model: ["0.25 s", "0.5 s", "0.75 s", "1 s"];
+            current-index: root.cfg.poll-index;
+            selected(v) => { root.cfg.poll-index = self.current-index; root.changed(); }
+        }
+    }
+
+    Heading { text: "Map name (optional)"; }
+    SettingRow {
+        first: true;
+        last: false;
+        label: "Map area";
+        hint: root.map-region-text == "Not selected yet" ? "For the Map item: box both lines of the name at the top of the minimap, with room for long names" : root.map-region-text;
+        Btn { text: "Select map area..."; clicked => { root.select-map(); } }
+        Btn { text: "Clear"; enabled: root.map-region-text != "Not selected yet"; clicked => { root.clear-map(); } }
+    }
+    if root.hdr: Card {
+        first: false;
+        last: false;
+        HorizontalLayout {
+            padding: 12px;
+            padding-left: 16px;
+            padding-right: 16px;
+            Note {
+                text: "HDR is on for the game's screen. A normal capture comes out washed out there (the letters and the panel both turn white), so the map is read from the game window's own picture in 16-bit colour, which keeps them apart.";
+            }
+        }
+    }
+    Card {
+        first: false;
+        last: true;
+        HorizontalLayout {
+            padding: 12px;
+            padding-left: 16px;
+            padding-right: 16px;
+            VerticalLayout {
+                spacing: 4px;
+                Text { text: root.map-count == 1 ? "1 map read" : "\{root.map-count} maps read"; color: Colors.text; }
+                Note { text: root.maps-read != "" ? root.maps-read : "Each new map is read once, by the text recognition built into Windows, and remembered."; }
+            }
+        }
+    }
+}

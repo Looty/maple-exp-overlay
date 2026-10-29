@@ -5,6 +5,7 @@ pub mod anim;
 pub mod config;
 pub mod editor;
 pub mod exp_table;
+pub mod map;
 pub mod reader;
 pub mod text;
 pub mod tracker;

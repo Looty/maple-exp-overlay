@@ -5,6 +5,8 @@
 //!   (no argument)    the overlay (right-click it, or use the tray icon, for the menu)
 //!   --settings       the settings window (the overlay's menu opens it)
 //!   --select-area    drag a box around the EXP text (the settings window starts it)
+//!   --select-map     the same, around the map name in the minimap's header
+//!   --read-map <fp>  reads the map name once with Windows' OCR (the overlay starts it for a new map)
 //!   --dump           one look, written to dump.txt in the settings folder, for working out what went wrong
 //!   --screen         (with any mode) ignore the game window and use the whole primary screen
 
@@ -17,6 +19,10 @@ fn main() {
 mod capture;
 #[cfg(windows)]
 mod log;
+#[cfg(windows)]
+mod map_reader;
+#[cfg(windows)]
+mod ocr;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
@@ -38,7 +44,9 @@ fn main() {
     let mode = std::env::args().skip(1).find(|a| a.starts_with("--") && a != "--screen");
     match mode.as_deref() {
         Some("--settings") => settings_ui::run(),
-        Some("--select-area") => selector::run(),
+        Some("--select-area") => selector::run(false),
+        Some("--select-map") => selector::run(true),
+        Some("--read-map") => map_reader::run(),
         Some("--dump") => overlay::dump(),
         _ => overlay::run(),
     }

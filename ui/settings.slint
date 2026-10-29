@@ -1,101 +1,33 @@
-import { AboutSlint, Button, ComboBox, LineEdit, ScrollView, Slider, SpinBox, Switch, TabWidget } from "std-widgets.slint";
+// The settings window: a sidebar of pages (in the style of Claude's desktop sidebar) and the page, in the dark
+// Windows 11 Settings look. Everything here is filled in and handled by src/settings_ui.rs.
 
-export struct Cfg {
-    font-size: int,
-    bold: bool,
-    opacity: int,
-    bg: color,
-    accent: color,
-    text-color: color,
-    dim: color,
-    bg-hex: string,
-    accent-hex: string,
-    text-hex: string,
-    dim-hex: string,
-    locked: bool,
-    topmost: bool,
-    taskbar: bool,
-    tray: bool,
-    hide-idle: bool,
-    hide-after: int,
-    new-session-idle: bool,
-    new-session-secs: int,
-    pos-x: int,
-    pos-y: int,
-    short-numbers: bool,
-    eta-recent: bool,
-    idle-secs: int,
-    window-min: int,
-    capture-index: int,
-    poll-index: int,
-    anim-count: bool,
-    anim-pop: bool,
-    anim-snail: bool,
-    anim-rainbow: bool,
-    autostart: bool,
-    start-hidden: bool,
-}
+import { Palette } from "std-widgets.slint";
+import { Colors, NavItem } from "widgets.slint";
+import { Cfg, Chip, PreviewItem, PreviewRow } from "types.slint";
+import { OverlayPage } from "pages/overlay.slint";
+import { LayoutPage } from "pages/layout.slint";
+import { DataPage } from "pages/data.slint";
+import { CapturePage } from "pages/capture.slint";
+import { EffectsPage } from "pages/effects.slint";
+import { GeneralPage } from "pages/general.slint";
+import { AboutPage } from "pages/about.slint";
 
-/// One draggable piece of data in the layout editor. Positions and sizes come from Rust (which also does the
-/// hit-testing), so the chips are drawn exactly where Rust thinks they are.
-export struct Chip {
-    label: string,
-    x: length,
-    y: length,
-    w: length,
-    h: length,
-    color: color,
-    shown: bool,
-}
-
-component Row inherits Rectangle {
-    in property <string> label;
-    in property <string> hint;
-    min-height: 40px;
-    HorizontalLayout {
-        spacing: 12px;
-        alignment: start;
-        Text { text: root.label; width: 210px; vertical-alignment: center; }
-        @children
-        if root.hint != "": Text { text: root.hint; color: #909090; vertical-alignment: center; font-size: 13px; }
-    }
-}
-
-component Section inherits Text {
-    font-weight: 700;
-    font-size: 17px;
-    height: 40px;
-    vertical-alignment: bottom;
-}
-
-component ColorRow inherits Row {
-    in property <color> swatch;
-    in property <string> hex;
-    callback edited(string);
-    Rectangle {
-        width: 34px;
-        height: 28px;
-        y: (parent.height - self.height) / 2;
-        background: root.swatch;
-        border-width: 1px;
-        border-color: #88888880;
-        border-radius: 4px;
-    }
-    LineEdit {
-        width: 130px;
-        text: root.hex;
-        edited(t) => { root.edited(t); }
-    }
-}
+export { Cfg, Chip, PreviewItem, PreviewRow }
 
 export component SettingsWindow inherits Window {
     title: "Maple EXP Overlay - Settings";
     icon: @image-url("../assets/icon.png");
-    default-font-size: 16px;
-    preferred-width: 760px;
-    preferred-height: 860px;
-    min-width: 640px;
-    min-height: 700px;
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+    background: Colors.window;
+    preferred-width: 920px;
+    preferred-height: 760px;
+    min-width: 800px;
+    min-height: 600px;
+    init => { Palette.color-scheme = ColorScheme.dark; }
+
+    /// The page showing: 0 Overlay, 1 Layout, 2 Data, 3 Capture, 4 Effects, 5 General, 6 About.
+    in-out property <int> page: 0;
 
     in-out property <Cfg> cfg;
     in property <[string]> fonts;
@@ -104,8 +36,12 @@ export component SettingsWindow inherits Window {
     in-out property <int> font-index;
     in-out property <string> font-name;
     in property <string> region-text;
-    /// The tab to open on: the Capture tab (2) until an area has been selected.
-    in property <int> start-tab: 0;
+    // the map name (see maple_exp::map): its area, and the maps read so far (one per line)
+    in property <string> map-region-text;
+    in property <int> map-count;
+    in property <string> maps-read;
+    /// HDR is on for the game's screen (the map is then read from a 16-bit capture).
+    in property <bool> hdr;
     in property <string> test-text;
     in property <bool> test-ok;
     in property <image> test-image;
@@ -113,10 +49,8 @@ export component SettingsWindow inherits Window {
     in property <string> test-caption;
     /// Text of the "switch capture method" button the test offers; empty = no button.
     in property <string> switch-label;
-    callback switch-capture();
     /// Seconds left before "Test in game" looks at the screen; 0 = not counting.
     in property <int> test-countdown: 0;
-    callback test-in-game();
     in property <string> version;
     /// The update check's result in words; empty before the first check.
     in property <string> update-text;
@@ -124,10 +58,12 @@ export component SettingsWindow inherits Window {
     in property <string> update-tag;
     /// A check or an install is running (the buttons wait).
     in property <bool> update-busy;
-    callback check-update();
-    callback install-update();
+    /// A newer version that is downloaded and checked ("v0.5.0"): "Relaunch to update" shows.
+    in property <string> update-ready;
     in property <string> data-folder;
 
+    /// The Overlay page's preview: the layout's shown items, row by row.
+    in property <[PreviewRow]> preview;
     // layout editor state (all set from Rust)
     in property <[Chip]> chips;
     in property <length> editor-h: 120px;
@@ -136,40 +72,18 @@ export component SettingsWindow inherits Window {
     in property <Chip> ghost;
     in property <length> caret-x;
     in property <length> caret-y;
+    in property <length> caret-w: 3px;
     in property <length> caret-h;
     in property <length> newrow-y;
-    /// The colours a chip can take (the first three are the overlay theme's), and the item being recoloured.
+    /// The colours an item can take (the first three are the overlay theme's).
     in property <[color]> palette;
-    in-out property <int> color-target: -1;
-
-    // right-click a chip: pick its colour
-    property <length> popup-x;
-    property <length> popup-y;
-    colors := PopupWindow {
-        x: root.popup-x;
-        y: root.popup-y;
-        width: 5 * 38px + 20px;
-        height: 4 * 38px + 40px;
-        Rectangle {
-            background: #2b2e36;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: #88888890;
-            Text { x: 10px; y: 6px; text: "Colour"; font-size: 13px; color: #b0b0b0; }
-            for c[i] in root.palette: Rectangle {
-                x: 10px + mod(i, 5) * 38px;
-                y: 28px + floor(i / 5) * 38px;
-                width: 32px;
-                height: 32px;
-                border-radius: 6px;
-                background: c;
-                border-width: 2px;
-                border-color: #ffffff40;
-                TouchArea { clicked => { root.color-picked(i); colors.close(); } }
-            }
-            Text { x: 10px; y: parent.height - 22px; text: "first three follow the theme"; font-size: 11px; color: #909090; }
-        }
-    }
+    // the selected item: Rust keeps it by id (its place in the list changes when chips are dragged)
+    in-out property <string> selected-id;
+    in property <bool> has-selection;
+    in property <string> selected-name;
+    in property <bool> selected-shown;
+    in property <bool> selected-fill;
+    in property <int> selected-tone;
 
     callback changed();
     callback theme-picked(int);
@@ -181,428 +95,192 @@ export component SettingsWindow inherits Window {
     callback drag-up(length, length);
     callback chip-right-click(length, length) -> bool;
     callback color-picked(int);
+    callback fill-toggled();
+    callback show-toggled();
     callback select-area();
     callback test-area();
+    callback test-in-game();
+    callback switch-capture();
+    callback select-map();
+    callback clear-map();
     callback reset-position();
     callback reset-all();
     callback open-folder();
+    callback preview-effects();
+    callback check-update();
+    callback install-update();
+    callback open-releases();
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
-
-        HorizontalLayout {
-            spacing: 12px;
-            Text {
-                text: "Layout";
-                font-weight: 700;
-                font-size: 17px;
-                vertical-alignment: center;
-            }
-            Text {
-                text: "drag to rearrange  |  click to show or hide  |  right-click to change colour";
-                color: #909090;
-                font-size: 13px;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-            for name[i] in root.layouts: Button {
-                text: name;
-                clicked => { root.layout-picked(i); }
-            }
-        }
-
-        // the editor: the overlay's own colours and font, with each piece of data as a chip
+    HorizontalLayout {
+        // the sidebar
         Rectangle {
-            height: root.editor-h;
-            border-radius: 8px;
-            background: root.cfg.bg;
-            border-width: 1px;
-            border-color: #88888860;
-            clip: true;
-
-            for c in root.chips: Rectangle {
-                x: c.x;
-                y: c.y;
-                width: c.w;
-                height: c.h;
-                border-radius: 5px;
-                background: c.shown ? #ffffff12 : transparent;
-                border-width: 1px;
-                border-color: c.shown ? c.color.with-alpha(0.55) : #88888870;
-                opacity: root.dragging && c.label == root.ghost.label ? 0.25 : 1;
-                Text {
-                    x: 10px;
-                    width: parent.width - 14px;
-                    height: parent.height;
-                    text: c.label;
-                    color: c.color;
-                    opacity: c.shown ? 1 : 0.4;
-                    font-size: root.chip-font;
-                    font-family: root.font-name;
-                    font-weight: root.cfg.bold ? 700 : 400;
-                    vertical-alignment: center;
-                    overflow: elide;
+            width: 210px;
+            background: Colors.sidebar;
+            VerticalLayout {
+                padding: 12px;
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 2px;
+                for item[i] in [
+                    { label: "Overlay", icon: "M2.5 3.5 H13.5 V12.5 H2.5 Z M2.5 6 H13.5" },
+                    { label: "Layout", icon: "M2.5 2.5 H13.5 V6.5 H2.5 Z M2.5 9.5 H7.5 V13.5 H2.5 Z M9.5 9.5 H13.5 V13.5 H9.5 Z" },
+                    { label: "Data", icon: "M2.5 13.5 L6 8.5 L9 11 L13.5 4" },
+                    { label: "Capture", icon: "M2.5 5.5 V2.5 H5.5 M10.5 2.5 H13.5 V5.5 M13.5 10.5 V13.5 H10.5 M5.5 13.5 H2.5 V10.5" },
+                    { label: "Effects", icon: "M8 2 L9.4 5.6 L13 7 L9.4 8.4 L8 12 L6.6 8.4 L3 7 L6.6 5.6 Z" },
+                    { label: "General", icon: "M2.5 4.5 H13.5 M2.5 8 H13.5 M2.5 11.5 H13.5" },
+                ]: NavItem {
+                    label: item.label;
+                    icon: item.icon;
+                    selected: root.page == i;
+                    clicked => { root.page = i; }
                 }
-            }
-
-            if root.dragging: Text {
-                x: 12px;
-                y: root.newrow-y;
-                text: "drop here for a new row";
-                color: #909090;
-                font-size: 13px;
-            }
-            if root.dragging: Rectangle {
-                x: root.caret-x;
-                y: root.caret-y;
-                width: 3px;
-                height: root.caret-h;
-                border-radius: 1px;
-                background: #4ea1ff;
-            }
-            if root.dragging: Rectangle {
-                x: root.ghost.x;
-                y: root.ghost.y;
-                width: root.ghost.w;
-                height: root.ghost.h;
-                border-radius: 5px;
-                background: #4ea1ff40;
-                border-width: 1px;
-                border-color: #4ea1ff;
-                Text {
-                    x: 10px;
-                    height: parent.height;
-                    text: root.ghost.label;
-                    color: root.ghost.color;
-                    font-size: root.chip-font;
-                    font-family: root.font-name;
-                    font-weight: root.cfg.bold ? 700 : 400;
-                    vertical-alignment: center;
-                }
-            }
-
-            ta := TouchArea {
-                pointer-event(e) => {
-                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                        root.drag-down(self.mouse-x, self.mouse-y);
-                    } else if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
-                        if root.chip-right-click(self.mouse-x, self.mouse-y) {
-                            root.popup-x = min(self.absolute-position.x + self.mouse-x, root.width - 5 * 38px - 28px);
-                            root.popup-y = self.absolute-position.y + self.mouse-y;
-                            colors.show();
+                Rectangle { vertical-stretch: 1; }
+                // a new version is downloaded and checked: one click swaps it in and restarts the overlay
+                if root.update-ready != "": Rectangle {
+                    height: 44px;
+                    border-radius: 10px;
+                    background: update-ta.has-hover ? #333331 : #2b2b2a;
+                    border-width: 1px;
+                    border-color: #3a3a38;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        Text {
+                            text: root.update-busy ? "Installing \{root.update-ready}..." : "Relaunch to update";
+                            font-weight: 600;
+                            color: #f2f0ed;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-                    } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
-                        root.drag-up(self.mouse-x, self.mouse-y);
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: 16px;
+                                height: 16px;
+                                viewbox-width: 16;
+                                viewbox-height: 16;
+                                commands: "M3 8 H13 M9 4 L13 8 L9 12";
+                                stroke: #b5b2ac;
+                                stroke-width: 1.4px;
+                                fill: transparent;
+                            }
+                        }
+                    }
+                    update-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        enabled: !root.update-busy;
+                        clicked => { root.install-update(); }
                     }
                 }
-                moved => { root.drag-move(self.mouse-x, self.mouse-y); }
+                Rectangle { height: 6px; }
+                Rectangle { height: 1px; background: #2e2e2c; }
+                Rectangle { height: 6px; }
+                NavItem {
+                    label: "About";
+                    icon: "M2 8 A6 6 0 1 0 14 8 A6 6 0 1 0 2 8 Z M8 7.5 V11 M8 5 V5.3";
+                    selected: root.page == 6;
+                    clicked => { root.page = 6; }
+                }
             }
         }
 
-        TabWidget {
-            vertical-stretch: 1;
-            current-index: root.start-tab;
-
-            Tab {
-                title: "Overlay";
-                ScrollView {
-                    VerticalLayout {
-                        padding-right: 16px;
-                        padding-top: 4px;
-                        alignment: start;
-                        Section { text: "Look"; }
-                        Row {
-                            label: "Colour theme";
-                            ComboBox { model: root.themes; width: 220px; selected(v) => { root.theme-picked(self.current-index); } }
-                        }
-                        Row {
-                            label: "Font";
-                            ComboBox { model: root.fonts; width: 260px; current-index: root.font-index; selected(v) => { root.font-picked(v); } }
-                        }
-                        Row {
-                            label: "Font size";
-                            hint: "points";
-                            SpinBox { minimum: 7; maximum: 40; value: root.cfg.font-size; edited(v) => { root.cfg.font-size = v; root.changed(); } }
-                        }
-                        Row {
-                            label: "Bold";
-                            Switch { checked: root.cfg.bold; toggled => { root.cfg.bold = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "Opacity";
-                            op := Slider { minimum: 20; maximum: 100; width: 220px; value: root.cfg.opacity; released(v) => { root.cfg.opacity = round(v); root.changed(); } }
-                            // (follows the handle while it is dragged, before anything is saved)
-                            Text { text: "\{round(op.value)}%"; vertical-alignment: center; min-width: 48px; }
-                        }
-                        Section { text: "Colours"; }
-                        ColorRow { label: "Background"; swatch: root.cfg.bg; hex: root.cfg.bg-hex; edited(t) => { root.hex-edited(0, t); } }
-                        ColorRow { label: "Main colour"; swatch: root.cfg.accent; hex: root.cfg.accent-hex; edited(t) => { root.hex-edited(1, t); } }
-                        ColorRow { label: "Normal text"; swatch: root.cfg.text-color; hex: root.cfg.text-hex; edited(t) => { root.hex-edited(2, t); } }
-                        ColorRow { label: "Status text"; swatch: root.cfg.dim; hex: root.cfg.dim-hex; edited(t) => { root.hex-edited(3, t); } }
-                        Section { text: "Position and behaviour"; }
-                        Row {
-                            label: "Position (x, y)";
-                            SpinBox { minimum: -10000; maximum: 20000; value: root.cfg.pos-x; edited(v) => { root.cfg.pos-x = v; root.changed(); } }
-                            SpinBox { minimum: -10000; maximum: 20000; value: root.cfg.pos-y; edited(v) => { root.cfg.pos-y = v; root.changed(); } }
-                            Button { text: "Reset"; clicked => { root.reset-position(); } }
-                        }
-                        Row {
-                            label: "Click-through";
-                            hint: "clicks pass to the game; unlock here to drag it";
-                            Switch { checked: root.cfg.locked; toggled => { root.cfg.locked = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "Always on top";
-                            Switch { checked: root.cfg.topmost; toggled => { root.cfg.topmost = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "Taskbar button";
-                            Switch { checked: root.cfg.taskbar; toggled => { root.cfg.taskbar = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "Hide when idle";
-                            hint: "back with the next EXP";
-                            Switch { checked: root.cfg.hide-idle; toggled => { root.cfg.hide-idle = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "Hide after";
-                            hint: "seconds without EXP";
-                            SpinBox {
-                                minimum: 5;
-                                maximum: 3600;
-                                step-size: 5;
-                                value: root.cfg.hide-after;
-                                edited(v) => { root.cfg.hide-after = Math.max(5, Math.round(v / 5) * 5); root.changed(); }
-                            }
-                        }
-                    }
-                }
+        // the page
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Colors.pane;
+            border-top-left-radius: 8px;
+            border-width: 1px;
+            border-color: Colors.pane-border;
+            if root.page == 0: OverlayPage {
+                cfg <=> root.cfg;
+                themes: root.themes;
+                fonts: root.fonts;
+                font-index: root.font-index;
+                font-name: root.font-name;
+                preview: root.preview;
+                changed => { root.changed(); }
+                theme-picked(i) => { root.theme-picked(i); }
+                font-picked(f) => { root.font-picked(f); }
+                hex-edited(i, t) => { root.hex-edited(i, t); }
+                reset-position => { root.reset-position(); }
             }
-
-            Tab {
-                title: "Data";
-                ScrollView {
-                    VerticalLayout {
-                        padding-right: 16px;
-                        padding-top: 4px;
-                        alignment: start;
-                        Text {
-                            wrap: word-wrap;
-                            color: #909090;
-                            font-size: 14px;
-                            text: "Choose what to show and where in the layout above: click a piece to show or hide it, drag it to move it.";
-                        }
-                        Section { text: "Numbers"; }
-                        Row { label: "Short numbers"; hint: "21.1K instead of 21,100"; Switch { checked: root.cfg.short-numbers; toggled => { root.cfg.short-numbers = self.checked; root.changed(); } } }
-                        Section { text: "Animations"; }
-                        Row { label: "Rolling numbers"; hint: "EXP, % and gained count up instead of jumping"; Switch { checked: root.cfg.anim-count; toggled => { root.cfg.anim-count = self.checked; root.changed(); } } }
-                        Row { label: "+EXP pop-up"; hint: "a +1,234 floats up above the overlay and fades"; Switch { checked: root.cfg.anim-pop; toggled => { root.cfg.anim-pop = self.checked; root.changed(); } } }
-                        Row { label: "Snail"; hint: "a new snail crawls along the top for each EXP gain"; Switch { checked: root.cfg.anim-snail; toggled => { root.cfg.anim-snail = self.checked; root.changed(); } } }
-                        Row { label: "Rainbow near level-up"; hint: "%, Lv, time to level and +EXP shimmer rainbow under 30 min to level"; Switch { checked: root.cfg.anim-rainbow; toggled => { root.cfg.anim-rainbow = self.checked; root.changed(); } } }
-                        Section { text: "How it counts"; }
-                        Row {
-                            label: "Time to level uses";
-                            ComboBox {
-                                width: 260px;
-                                model: ["Recent rate (last few minutes)", "Whole session average"];
-                                current-index: root.cfg.eta-recent ? 0 : 1;
-                                selected(v) => { root.cfg.eta-recent = self.current-index == 0; root.changed(); }
-                            }
-                        }
-                        Row {
-                            label: "Pause after";
-                            hint: "seconds without EXP";
-                            SpinBox { minimum: 5; maximum: 300; value: root.cfg.idle-secs; edited(v) => { root.cfg.idle-secs = v; root.changed(); } }
-                        }
-                        Row {
-                            label: "New session after a break";
-                            hint: "gained, EXP/h, time farmed and time to level start over";
-                            Switch { checked: root.cfg.new-session-idle; toggled => { root.cfg.new-session-idle = self.checked; root.changed(); } }
-                        }
-                        Row {
-                            label: "A break is";
-                            hint: "seconds without EXP";
-                            SpinBox {
-                                minimum: 30;
-                                maximum: 7200;
-                                step-size: 30;
-                                value: root.cfg.new-session-secs;
-                                edited(v) => { root.cfg.new-session-secs = Math.max(30, Math.round(v / 30) * 30); root.changed(); }
-                            }
-                        }
-                        Row {
-                            label: "Recent rate covers";
-                            hint: "minutes";
-                            SpinBox { minimum: 1; maximum: 60; value: root.cfg.window-min; edited(v) => { root.cfg.window-min = v; root.changed(); } }
-                        }
-                    }
-                }
+            if root.page == 1: LayoutPage {
+                cfg: root.cfg;
+                font-name: root.font-name;
+                layouts: root.layouts;
+                chips: root.chips;
+                editor-h: root.editor-h;
+                chip-font: root.chip-font;
+                dragging: root.dragging;
+                ghost: root.ghost;
+                caret-x: root.caret-x;
+                caret-y: root.caret-y;
+                caret-w: root.caret-w;
+                caret-h: root.caret-h;
+                newrow-y: root.newrow-y;
+                palette: root.palette;
+                has-selection: root.has-selection;
+                selected-name: root.selected-name;
+                selected-shown: root.selected-shown;
+                selected-fill: root.selected-fill;
+                selected-tone: root.selected-tone;
+                layout-picked(i) => { root.layout-picked(i); }
+                drag-down(x, y) => { root.drag-down(x, y); }
+                drag-move(x, y) => { root.drag-move(x, y); }
+                drag-up(x, y) => { root.drag-up(x, y); }
+                chip-right-click(x, y) => { return root.chip-right-click(x, y); }
+                color-picked(i) => { root.color-picked(i); }
+                fill-toggled => { root.fill-toggled(); }
+                show-toggled => { root.show-toggled(); }
             }
-
-            Tab {
-                title: "Capture";
-                ScrollView {
-                    init => { self.content-y = 0px; }
-                    VerticalLayout {
-                        padding-right: 16px;
-                        padding-top: 4px;
-                        alignment: start;
-                        spacing: 4px;
-                        Section { text: "Set up in three steps"; }
-                        Text {
-                            wrap: word-wrap;
-                            text: "1. Start MapleStory (windowed or borderless fullscreen) and make sure the EXP bar at the bottom is visible.\n2. Click \"Select area...\" below, then drag a box around the EXP text, for example \"EXP. 24,855 [20.25%]\". Include the \"EXP.\" label and a little margin, and nothing else. Esc cancels.\n3. Click \"Test in game\", then switch to the game within 5 seconds and leave it in front. It should say \"Works\". If not, it tells you what to change.\n\nWhy test in the game: with the game in front, Windows normally hides the taskbar over a borderless fullscreen game. With this settings window in front, the taskbar can cover the EXP bar, so a test taken now can fail even though the overlay works while you play.\n\nThe overlay reads nothing until an area is selected. If you move or resize the game, or change its UI scale, select the area again.";
-                        }
-                        Section { text: "EXP bar area"; }
-                        Row {
-                            label: "Selected area";
-                            Text { text: root.region-text; vertical-alignment: center; }
-                        }
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: start;
-                            Button { text: "Select area..."; primary: root.region-text == "Not selected yet"; clicked => { root.select-area(); } }
-                            Button {
-                                text: root.test-countdown > 0 ? "Testing in \{root.test-countdown} s..." : "Test in game (5 s)";
-                                enabled: root.test-countdown == 0;
-                                primary: root.region-text != "Not selected yet";
-                                clicked => { root.test-in-game(); }
-                            }
-                            Button { text: "Test now"; enabled: root.test-countdown == 0; clicked => { root.test-area(); } }
-                        }
-                        if root.test-countdown > 0: Text {
-                            text: "Switch to the game now and leave it in front...";
-                            color: #4ea1ff;
-                            font-weight: 700;
-                        }
-                        Section { text: "Capture"; }
-                        Row {
-                            label: "Capture method";
-                            ComboBox {
-                                width: 420px;
-                                model: ["Screen (what you see)", "Game window's own picture"];
-                                current-index: root.cfg.capture-index;
-                                selected(v) => { root.cfg.capture-index = self.current-index; root.changed(); }
-                            }
-                        }
-                        Text {
-                            text: "Screen: reads what is on your screen, like any screen recorder. Use it if nothing covers the EXP bar.\nGame window: reads the game's own picture, so the Windows taskbar or another window on top of the game can't hide the bar. Use it if \"Test in game\" says the text is cut off or covered.";
-                            wrap: word-wrap;
-                            color: #909090;
-                            font-size: 14px;
-                        }
-                        Row {
-                            label: "Look every";
-                            ComboBox {
-                                width: 140px;
-                                model: ["250 ms", "500 ms", "750 ms", "1000 ms"];
-                                current-index: root.cfg.poll-index;
-                                selected(v) => { root.cfg.poll-index = self.current-index; root.changed(); }
-                            }
-                        }
-                        Text {
-                            text: "How often the bar is checked while the game is running. New EXP shows up within one check, so a shorter time is quicker to react and costs slightly more CPU.";
-                            wrap: word-wrap;
-                            color: #909090;
-                            font-size: 14px;
-                        }
-                        Section { text: "Test result"; }
-                        Text {
-                            text: root.test-text == "" ? "Press \"Test in game\", then switch to the game." : root.test-text;
-                            wrap: word-wrap;
-                            color: root.test-ok ? #3fae5f : root.test-text == "" ? #909090 : #d9534f;
-                        }
-                        if root.switch-label != "": HorizontalLayout {
-                            alignment: start;
-                            Button { text: root.switch-label; primary: true; clicked => { root.switch-capture(); } }
-                        }
-                        if root.has-test-image: Text { text: root.test-caption; color: #909090; font-size: 13px; }
-                        if root.has-test-image: Rectangle {
-                            height: 130px;
-                            background: #00000030;
-                            border-radius: 6px;
-                            Image { source: root.test-image; image-fit: contain; width: parent.width - 16px; height: parent.height - 16px; image-rendering: pixelated; }
-                        }
-                    }
-                }
+            if root.page == 2: DataPage {
+                cfg <=> root.cfg;
+                changed => { root.changed(); }
             }
-
-            Tab {
-                title: "General";
-                ScrollView {
-                    VerticalLayout {
-                        padding-right: 16px;
-                        padding-top: 4px;
-                        alignment: start;
-                        Section { text: "Startup"; }
-                        Row { label: "Start with Windows"; Switch { checked: root.cfg.autostart; toggled => { root.cfg.autostart = self.checked; root.changed(); } } }
-                        Row { label: "Tray icon"; hint: "also your way back to these settings"; Switch { checked: root.cfg.tray; toggled => { root.cfg.tray = self.checked; root.changed(); } } }
-                        Row { label: "Start hidden"; hint: "tray only, until you show it"; Switch { checked: root.cfg.start-hidden; toggled => { root.cfg.start-hidden = self.checked; root.changed(); } } }
-                        Section { text: "Data"; }
-                        Row { label: "Settings folder"; Text { text: root.data-folder; vertical-alignment: center; } }
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: start;
-                            Button { text: "Open folder"; clicked => { root.open-folder(); } }
-                            Button { text: "Reset all settings"; clicked => { root.reset-all(); } }
-                        }
-                    }
-                }
+            if root.page == 3: CapturePage {
+                cfg <=> root.cfg;
+                region-text: root.region-text;
+                test-text: root.test-text;
+                test-ok: root.test-ok;
+                test-image: root.test-image;
+                has-test-image: root.has-test-image;
+                test-caption: root.test-caption;
+                switch-label: root.switch-label;
+                test-countdown: root.test-countdown;
+                map-region-text: root.map-region-text;
+                map-count: root.map-count;
+                maps-read: root.maps-read;
+                hdr: root.hdr;
+                changed => { root.changed(); }
+                select-area => { root.select-area(); }
+                test-area => { root.test-area(); }
+                test-in-game => { root.test-in-game(); }
+                switch-capture => { root.switch-capture(); }
+                select-map => { root.select-map(); }
+                clear-map => { root.clear-map(); }
             }
-
-            Tab {
-                title: "About";
-                ScrollView {
-                    VerticalLayout {
-                        padding-right: 16px;
-                        padding-top: 8px;
-                        spacing: 10px;
-                        alignment: start;
-                        HorizontalLayout {
-                            spacing: 14px;
-                            alignment: start;
-                            Image { source: @image-url("../assets/icon.png"); width: 72px; height: 72px; }
-                            VerticalLayout {
-                                alignment: center;
-                                Text { text: "Maple EXP Overlay"; font-size: 22px; font-weight: 700; }
-                                Text { text: "Version \{root.version}"; color: #909090; }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: start;
-                            Button { text: "Check for updates"; enabled: !root.update-busy; clicked => { root.check-update(); } }
-                            if root.update-tag != "": Button {
-                                text: "Update to \{root.update-tag}";
-                                primary: true;
-                                enabled: !root.update-busy;
-                                clicked => { root.install-update(); }
-                            }
-                        }
-                        if root.update-text != "": Text { text: root.update-text; wrap: word-wrap; color: #909090; }
-                        Text {
-                            wrap: word-wrap;
-                            text: "A tiny EXP tracker for MapleStory Classic World. It only looks at your screen: it never touches the game's files or memory, and never sends input.";
-                        }
-                        Section { text: "Unofficial"; }
-                        Text {
-                            wrap: word-wrap;
-                            text: "This is a fan-made tool. It is not made, endorsed or supported by Nexon, and it is not affiliated with Nexon. MapleStory is a trademark of Nexon. Using any third-party tool alongside an online game is at your own risk: read Nexon's Terms of Service, and if you are unsure whether a screen-reading tool is allowed, ask Nexon support.";
-                        }
-                        Section { text: "How the numbers are worked out"; }
-                        Text {
-                            wrap: word-wrap;
-                            text: "The game's EXP bar shows 'EXP. 24,855 [20.25%]'. Every second the overlay reads that text (the digits are matched against saved shapes; there is no OCR engine). A new reading counts only after two looks in a row agree, so a misread digit is never counted as EXP.\n\nEXP gained = the change in the bar between readings. At a level-up the rest of the old bar plus the start of the new one is counted, using the level's size worked out from the EXP number and the percentage.\n\nEXP/h = EXP gained ÷ time farmed × 3600. Time farmed leaves out the stretches where you got no EXP for the 'Pause after' time, so waiting around doesn't drag the rate down. The recent rate uses only the last few minutes of farmed time.\n\nTime to next level = the percentage left ÷ your percent-per-hour. If the game hides the EXP number, the overlay works from the percentage alone and shows % per hour.";
-                        }
-                        Section { text: "Credits"; }
-                        Text {
-                            wrap: word-wrap;
-                            text: "The digit shapes and the idea of reading the bar by shape come from Maple Classic Exp Overlay by beanguri (MIT licence). The levelling table is the game's public table.";
-                        }
-                        AboutSlint { }
-                    }
-                }
+            if root.page == 4: EffectsPage {
+                cfg <=> root.cfg;
+                changed => { root.changed(); }
+                preview-effects => { root.preview-effects(); }
+            }
+            if root.page == 5: GeneralPage {
+                cfg <=> root.cfg;
+                data-folder: root.data-folder;
+                changed => { root.changed(); }
+                open-folder => { root.open-folder(); }
+                reset-all => { root.reset-all(); }
+            }
+            if root.page == 6: AboutPage {
+                version: root.version;
+                update-text: root.update-text;
+                update-tag: root.update-tag;
+                update-busy: root.update-busy;
+                update-ready: root.update-ready;
+                check-update => { root.check-update(); }
+                install-update => { root.install-update(); }
+                open-releases => { root.open-releases(); }
             }
         }
     }

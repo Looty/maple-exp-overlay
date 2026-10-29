@@ -131,6 +131,17 @@ pub fn window_capture_error() -> String {
 /// The same screen rectangle as `capture_screen`, but from the game window's own picture (Windows Graphics
 /// Capture), so a taskbar or another window on top of the game isn't in it. None if that isn't possible.
 pub unsafe fn capture_window(hwnd: HWND, x: i32, y: i32, cw: i32, ch: i32) -> Option<Frame> {
+    capture_window_as(hwnd, x, y, cw, ch, false)
+}
+
+/// The game window's own picture of a screen rectangle, in true colours even with HDR on (taken in 16-bit float and
+/// brought back to 8 bits, the lightest part white; see `wgc::deep_to_bgra`). For reading the map name. None when
+/// there is no game window, or Windows gives nothing.
+pub unsafe fn capture_true_colour(x: i32, y: i32, cw: i32, ch: i32) -> Option<Frame> {
+    capture_window_as(game_hwnd(), x, y, cw, ch, true)
+}
+
+unsafe fn capture_window_as(hwnd: HWND, x: i32, y: i32, cw: i32, ch: i32, deep: bool) -> Option<Frame> {
     if hwnd.is_null() || IsWindow(hwnd) == 0 {
         WGC.with(|g| *g.borrow_mut() = None);
         return None;
@@ -155,7 +166,7 @@ pub unsafe fn capture_window(hwnd: HWND, x: i32, y: i32, cw: i32, ch: i32) -> Op
                 }
             }
         }
-        let f = g.as_mut().and_then(|s| s.grab(ox, oy, cw, ch));
+        let f = g.as_mut().and_then(|s| s.grab(ox, oy, cw, ch, deep));
         if f.is_none() {
             WGC_ERR.with(|m| *m.borrow_mut() = "no frame, or the area is outside the window".to_string());
         }
@@ -176,10 +187,60 @@ pub unsafe fn grab(use_window: bool, x: i32, y: i32, w: i32, h: i32) -> (Option<
     (capture_screen(x, y, w, h), "screen")
 }
 
+/// What is on screen over a box, at its middle and near its corners: the game (true), or another window (false; the
+/// box would show that window, not the game). Cheap: a few `WindowFromPoint` calls. `ours` is allowed too (the
+/// overlay's own windows sit on top of the game).
+pub unsafe fn game_shows_at(x: i32, y: i32, w: i32, h: i32, ours: &[HWND]) -> bool {
+    let game = game_hwnd();
+    if game.is_null() {
+        return false;
+    }
+    let (dx, dy) = ((w / 8).max(1), (h / 8).max(1));
+    [(x + w / 2, y + h / 2), (x + dx, y + dy), (x + w - dx, y + dy), (x + dx, y + h - dy), (x + w - dx, y + h - dy)].iter().all(
+        |&(px, py)| {
+            let top = GetAncestor(WindowFromPoint(POINT { x: px, y: py }), GA_ROOT);
+            top == game || ours.contains(&top)
+        },
+    )
+}
+
 /// Whether the game is the window in front (a debugging aid: the taskbar behaves differently then).
 pub unsafe fn game_in_front() -> bool {
     let g = game_hwnd();
     !g.is_null() && GetForegroundWindow() == g
+}
+
+/// HDR is on for the screen the game is on (the primary screen without a game). Captures then come out lighter and
+/// washed out, since Windows lifts the game's SDR colours to sit in the HDR picture. None when it can't be told.
+pub fn hdr_on() -> Option<bool> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
+    let monitor = unsafe {
+        let g = game_hwnd();
+        if g.is_null() {
+            MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY)
+        } else {
+            MonitorFromWindow(g, MONITOR_DEFAULTTONEAREST)
+        }
+    };
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut first = None;
+        for a in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(a) else { break };
+            for o in 0.. {
+                let Ok(output) = adapter.EnumOutputs(o) else { break };
+                let Ok(desc) = output.cast::<IDXGIOutput6>().and_then(|o6| o6.GetDesc1()) else { continue };
+                let hdr = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                if desc.Monitor.0 as isize == monitor as isize {
+                    return Some(hdr);
+                }
+                first.get_or_insert(hdr);
+            }
+        }
+        first
+    }
 }
 
 /// Saves a frame as a 32-bit BMP.

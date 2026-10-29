@@ -1,0 +1,68 @@
+// The data the settings window shows, filled in from Rust (src/settings_ui.rs).
+
+export struct Cfg {
+    font-size: int,
+    bold: bool,
+    opacity: int,
+    bg: color,
+    accent: color,
+    text-color: color,
+    dim: color,
+    bg-hex: string,
+    accent-hex: string,
+    text-hex: string,
+    dim-hex: string,
+    locked: bool,
+    topmost: bool,
+    taskbar: bool,
+    tray: bool,
+    hide-idle: bool,
+    hide-after: int,
+    new-session-idle: bool,
+    new-session-secs: int,
+    pos-x: int,
+    pos-y: int,
+    short-numbers: bool,
+    eta-recent: bool,
+    idle-secs: int,
+    window-min: int,
+    capture-index: int,
+    poll-index: int,
+    anim-count: bool,
+    anim-pop: bool,
+    anim-snail: bool,
+    anim-rainbow: bool,
+    rainbow-min: int,
+    autostart: bool,
+    start-hidden: bool,
+    update-check: bool,
+}
+
+/// One piece of the overlay preview: a sample of what the item shows, or the EXP/h graph's bars.
+export struct PreviewItem {
+    text: string,
+    color: color,
+    fill: bool,
+    bars: bool,
+}
+
+/// One row of the overlay preview (the layout's shown items, as the overlay lays them out).
+export struct PreviewRow {
+    items: [PreviewItem],
+    /// an item in it fills the room the row leaves
+    fill: bool,
+}
+
+/// One draggable piece of data in the layout editor. Positions and sizes come from Rust (which also does the
+/// hit-testing), so the chips are drawn exactly where Rust thinks they are.
+export struct Chip {
+    label: string,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    color: color,
+    shown: bool,
+    /// the one the "Selected item" card is about
+    selected: bool,
+}
