@@ -50,7 +50,12 @@ windows-sys = { version = "0.59", features = [
 # WinRT, for Windows Graphics Capture only (capturing the game window itself)
 windows = { version = "0.58", features = [
     "Foundation",
+    "Foundation_Collections",
+    "Globalization",
     "Graphics_Capture",
+    "Graphics_Imaging", # (SoftwareBitmap, for Windows' own OCR: reading the map name)
+    "Media_Ocr",
+    "Storage_Streams",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
     "Win32_Foundation",
@@ -58,6 +63,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi", # (for DXGI_OUTPUT_DESC1: is HDR on for the game's screen)
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",

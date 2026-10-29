@@ -3,7 +3,8 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     #[cfg(windows)]
     {
-        let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
+        // (dark, whatever the system theme: the window's own colours are dark)
+        let config = slint_build::CompilerConfiguration::new().with_style("fluent-dark".into());
         slint_build::compile_with_config("ui/settings.slint", config).unwrap();
 
         // Embed the icon and manifest so Explorer, the taskbar, the tray and Task Manager show the icon and

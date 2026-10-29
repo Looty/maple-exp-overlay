@@ -1,0 +1,106 @@
+// Effects: the overlay's little animations (all off by default).
+
+import { SpinBox } from "std-widgets.slint";
+import { Card, Check, Colors, Page, SettingRow } from "../widgets.slint";
+import { Cfg } from "../types.slint";
+
+/// An effect: a small badge, its name and what it does, and its check box (the whole card toggles it).
+component EffectRow inherits Card {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> badge;
+    in property <color> badge-color;
+    in property <bool> checked;
+    callback toggled();
+    min-height: 72px;
+    TouchArea { clicked => { root.toggled(); } }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 14px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 6px;
+                background: #181b22;
+                Text { text: root.badge; color: root.badge-color; font-weight: 700; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: root.label; color: Colors.text; }
+            Text { text: root.hint; color: Colors.hint; font-size: 12px; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Check { checked: root.checked; clicked => { root.toggled(); } }
+        }
+    }
+}
+
+export component EffectsPage inherits Page {
+    in-out property <Cfg> cfg;
+    callback changed();
+    callback preview-effects();
+    title: "Effects";
+    action: "▶  Preview effects";
+    action-clicked => { root.preview-effects(); }
+
+    EffectRow {
+        first: true;
+        last: false;
+        label: "Rolling numbers";
+        hint: "EXP, % and gained count up instead of jumping";
+        badge: "123";
+        badge-color: #e0e0e0;
+        checked: root.cfg.anim-count;
+        toggled => { root.cfg.anim-count = !root.cfg.anim-count; root.changed(); }
+    }
+    EffectRow {
+        first: false;
+        last: false;
+        label: "+EXP pop-up";
+        hint: "A +1,234 floats up above the overlay and fades";
+        badge: "+1K";
+        badge-color: #ffd455;
+        checked: root.cfg.anim-pop;
+        toggled => { root.cfg.anim-pop = !root.cfg.anim-pop; root.changed(); }
+    }
+    EffectRow {
+        first: false;
+        last: false;
+        label: "Snail";
+        hint: "A snail crawls along the top for each EXP gain";
+        badge: "@";
+        badge-color: #ff9a2e;
+        checked: root.cfg.anim-snail;
+        toggled => { root.cfg.anim-snail = !root.cfg.anim-snail; root.changed(); }
+    }
+    EffectRow {
+        first: false;
+        last: true;
+        label: "Rainbow near level-up";
+        hint: "%, Lv, time to level and +EXP shimmer when the level is close";
+        badge: "Lv";
+        badge-color: #a78bfa;
+        checked: root.cfg.anim-rainbow;
+        toggled => { root.cfg.anim-rainbow = !root.cfg.anim-rainbow; root.changed(); }
+    }
+    Rectangle { height: 12px; }
+    SettingRow {
+        label: "Rainbow starts at";
+        hint: "Minutes left to the next level";
+        dim: !root.cfg.anim-rainbow;
+        SpinBox {
+            width: 110px;
+            enabled: root.cfg.anim-rainbow;
+            minimum: 1;
+            maximum: 600;
+            value: root.cfg.rainbow-min;
+            edited(v) => { root.cfg.rainbow-min = v; root.changed(); }
+        }
+    }
+}

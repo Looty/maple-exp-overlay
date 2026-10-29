@@ -14,7 +14,7 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
@@ -26,8 +26,39 @@ pub struct Wgc {
     ctx: ID3D11DeviceContext,
     winrt_device: IDirect3DDevice,
     item: GraphicsCaptureItem,
-    /// the small CPU-readable texture the box is copied into; kept while its size stays the same
-    staging: Option<(ID3D11Texture2D, i32, i32)>,
+    /// the small CPU-readable texture the box is copied into; kept while its size (and depth) stays the same
+    staging: Option<(ID3D11Texture2D, i32, i32, bool)>,
+}
+
+/// A half-precision float (as FP16 textures hold them) as an f32.
+fn half(b: u16) -> f32 {
+    let (sign, exp, man) = ((b >> 15) as u32, ((b >> 10) & 0x1f) as i32, (b & 0x3ff) as f32);
+    let v = match exp {
+        0 => man / 1024.0 * 2f32.powi(-14),
+        31 => f32::INFINITY,
+        e => (1.0 + man / 1024.0) * 2f32.powi(e - 15),
+    };
+    if sign == 1 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// Linear light (0..1) to an 8-bit sRGB value.
+fn srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (v * 255.0).round() as u8
+}
+
+/// An FP16 (scRGB: linear, 1.0 = SDR white) box as 8-bit BGRA, scaled so its lightest channel is white. With HDR on,
+/// Windows lifts the game's SDR picture above 1.0; an 8-bit capture then clips the light colours together (the map
+/// name's letters and the panel behind them both become pure white), while these values keep them apart.
+fn deep_to_bgra(rgba: &[f32]) -> Vec<u8> {
+    let clean = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let top = rgba.chunks_exact(4).flat_map(|p| p[..3].iter().map(|&v| clean(v))).fold(0.0f32, f32::max).max(1e-6);
+    rgba.chunks_exact(4).flat_map(|p| [srgb(clean(p[2]) / top), srgb(clean(p[1]) / top), srgb(clean(p[0]) / top), 255]).collect()
 }
 
 impl Wgc {
@@ -60,16 +91,16 @@ impl Wgc {
         self.hwnd
     }
 
-    /// The part (x, y, w, h), in window pixels, of a fresh frame; None if no frame arrives soon.
-    pub fn grab(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
+    /// The part (x, y, w, h), in window pixels, of a fresh frame; None if no frame arrives soon. `deep`: taken in 16-bit
+    /// float and brought back to 8 bits here (see `deep_to_bgra`), for true colours with HDR on.
+    pub fn grab(&mut self, x: i32, y: i32, w: i32, h: i32, deep: bool) -> Option<Frame> {
         unsafe {
             let size = self.item.Size().ok()?;
             if x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > size.Width || y + h > size.Height {
                 return None;
             }
-            let pool =
-                Direct3D11CaptureFramePool::CreateFreeThreaded(&self.winrt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size)
-                    .ok()?;
+            let format = if deep { DirectXPixelFormat::R16G16B16A16Float } else { DirectXPixelFormat::B8G8R8A8UIntNormalized };
+            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&self.winrt_device, format, 1, size).ok()?;
             let session = pool.CreateCaptureSession(&self.item).ok()?;
             let _ = session.SetIsCursorCaptureEnabled(false);
             let _ = session.SetIsBorderRequired(false); // (only Windows 11 / newer 10 builds; ignored elsewhere)
@@ -84,7 +115,7 @@ impl Wgc {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             let out = frame.and_then(|f| {
-                let r = self.read_box(&f, x, y, w, h);
+                let r = self.read_box(&f, x, y, w, h, deep);
                 let _ = f.Close();
                 r
             });
@@ -101,16 +132,17 @@ impl Wgc {
         y: i32,
         w: i32,
         h: i32,
+        deep: bool,
     ) -> Option<Frame> {
         unsafe {
             let tex: ID3D11Texture2D = frame.Surface().ok()?.cast::<IDirect3DDxgiInterfaceAccess>().ok()?.GetInterface().ok()?;
-            if self.staging.as_ref().is_none_or(|(_, sw, sh)| (*sw, *sh) != (w, h)) {
+            if self.staging.as_ref().is_none_or(|(_, sw, sh, sd)| (*sw, *sh, *sd) != (w, h, deep)) {
                 let desc = D3D11_TEXTURE2D_DESC {
                     Width: w as u32,
                     Height: h as u32,
                     MipLevels: 1,
                     ArraySize: 1,
-                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    Format: if deep { DXGI_FORMAT_R16G16B16A16_FLOAT } else { DXGI_FORMAT_B8G8R8A8_UNORM },
                     SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                     Usage: D3D11_USAGE_STAGING,
                     BindFlags: 0,
@@ -119,20 +151,27 @@ impl Wgc {
                 };
                 let mut t = None;
                 self.device.CreateTexture2D(&desc, None, Some(&mut t)).ok()?;
-                self.staging = Some((t?, w, h));
+                self.staging = Some((t?, w, h, deep));
             }
             let staging = &self.staging.as_ref()?.0;
             let region = D3D11_BOX { left: x as u32, top: y as u32, front: 0, right: (x + w) as u32, bottom: (y + h) as u32, back: 1 };
             self.ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, &tex, 0, Some(&region));
             let mut map = D3D11_MAPPED_SUBRESOURCE::default();
             self.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut map)).ok()?;
-            let mut px = Vec::with_capacity((w * h * 4) as usize);
+            let bpp = if deep { 8 } else { 4 };
+            let mut raw = Vec::with_capacity((w * h * bpp) as usize);
             for row in 0..h as usize {
-                // (rows are RowPitch apart, which is not always w * 4)
-                let src = std::slice::from_raw_parts((map.pData as *const u8).add(row * map.RowPitch as usize), (w * 4) as usize);
-                px.extend_from_slice(src);
+                // (rows are RowPitch apart, which is not always w * bytes per pixel)
+                let src = std::slice::from_raw_parts((map.pData as *const u8).add(row * map.RowPitch as usize), (w * bpp) as usize);
+                raw.extend_from_slice(src);
             }
             self.ctx.Unmap(staging, 0);
+            let mut px = if deep {
+                let rgba: Vec<f32> = raw.chunks_exact(2).map(|b| half(u16::from_le_bytes([b[0], b[1]]))).collect();
+                deep_to_bgra(&rgba)
+            } else {
+                raw
+            };
             for p in px.chunks_exact_mut(4) {
                 p[3] = 255;
             }

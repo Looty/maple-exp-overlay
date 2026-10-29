@@ -1,0 +1,157 @@
+// About: the version and updates, the unofficial notice, how the numbers are worked out, credits.
+
+import { AboutSlint } from "std-widgets.slint";
+import { Btn, Card, Colors, Heading, Note, Page, SettingRow } from "../widgets.slint";
+
+/// A card that opens and closes the text under it.
+component Expander inherits Card {
+    in property <string> label;
+    in-out property <bool> open;
+    min-height: 52px;
+    TouchArea { mouse-cursor: pointer; clicked => { root.open = !root.open; } }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        Text { text: root.label; color: Colors.text; vertical-alignment: center; horizontal-stretch: 1; }
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 12px;
+                height: 12px;
+                viewbox-width: 12;
+                viewbox-height: 12;
+                commands: root.open ? "M2 8 L6 4 L10 8" : "M2 4 L6 8 L10 4";
+                stroke: Colors.hint;
+                stroke-width: 1.4px;
+                fill: transparent;
+            }
+        }
+    }
+}
+
+export component AboutPage inherits Page {
+    in property <string> version;
+    /// the update check's result in words; empty before the first check
+    in property <string> update-text;
+    /// a newer version that can be installed ("v0.5.0"); empty = no install button
+    in property <string> update-tag;
+    in property <bool> update-busy;
+    /// a newer version, downloaded and checked: ready to relaunch into
+    in property <string> update-ready;
+    callback check-update();
+    callback install-update();
+    callback open-releases();
+    property <bool> how-open;
+    title: "About";
+
+    Card {
+        first: true;
+        last: false;
+        HorizontalLayout {
+            padding: 16px;
+            spacing: 16px;
+            Image { source: @image-url("../../assets/icon.png"); width: 56px; height: 56px; }
+            VerticalLayout {
+                alignment: center;
+                Text { text: "Maple EXP Overlay"; font-size: 18px; font-weight: 600; color: Colors.text; }
+                Text { text: "Version \{root.version}"; color: Colors.hint; font-size: 12px; }
+            }
+        }
+    }
+    if root.update-ready != "": Card {
+        first: false;
+        last: true;
+        min-height: 64px;
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: Colors.accent;
+                    Text { text: "↓"; color: black; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text { text: "\{root.update-ready} is ready"; color: Colors.text; } // (the tag: "v0.5.0")
+                Text { text: root.update-busy ? "Installing..." : "Downloaded and signature checked"; color: Colors.hint; font-size: 12px; }
+            }
+            VerticalLayout {
+                alignment: center;
+                Btn { text: "Relaunch to update"; primary: true; enabled: !root.update-busy; clicked => { root.install-update(); } }
+            }
+        }
+    }
+    if root.update-ready == "": SettingRow {
+        first: false;
+        last: true;
+        label: "Updates";
+        hint: root.update-text != "" ? root.update-text : "Only releases signed with this project's key are installed";
+        Btn { text: "Check for updates"; enabled: !root.update-busy; clicked => { root.check-update(); } }
+        if root.update-tag != "": Btn { text: "Update to \{root.update-tag}"; primary: true; enabled: !root.update-busy; clicked => { root.install-update(); } }
+    }
+
+    Heading { text: "Unofficial"; }
+    Card {
+        HorizontalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            Text {
+                wrap: word-wrap;
+                color: #cfcfcf;
+                font-size: 13px;
+                text: "A fan-made tool: not made, endorsed or supported by Nexon, and not affiliated with Nexon. MapleStory is a trademark of Nexon. It only looks at your screen: it never touches the game's files or memory and never sends input. Using any third-party tool with an online game is at your own risk: read Nexon's Terms of Service, and if you are unsure whether a screen-reading tool is allowed, ask Nexon support.";
+            }
+        }
+    }
+
+    Heading { text: "More"; }
+    Expander { first: true; last: false; label: "How the numbers are worked out"; open <=> root.how-open; }
+    if root.how-open: Card {
+        first: false;
+        last: false;
+        HorizontalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            Text {
+                wrap: word-wrap;
+                color: #cfcfcf;
+                font-size: 13px;
+                text: "The game's EXP bar shows 'EXP. 24,855 [20.25%]'. The overlay reads that text by matching the digits against saved shapes (no OCR engine). A new reading counts only after two looks in a row agree, so a misread digit is never counted as EXP.\n\nEXP gained = the change in the bar between readings. At a level-up the rest of the old bar plus the start of the new one is counted, using the level's size worked out from the EXP number and the percentage.\n\nEXP/h = EXP gained ÷ time farmed × 3600. Time farmed leaves out the stretches where you got no EXP for the 'Pause after' time, so waiting around doesn't drag the rate down. The recent rate uses only the last few minutes of farmed time.\n\nTime to next level = the percentage left ÷ your percent-per-hour. If the game hides the EXP number, the overlay works from the percentage alone and shows % per hour.";
+            }
+        }
+    }
+    SettingRow {
+        first: false;
+        last: false;
+        label: "Releases on GitHub";
+        hint: "Every version, with its changes";
+        Btn { text: "Open  ↗"; clicked => { root.open-releases(); } }
+    }
+    Card {
+        first: false;
+        last: true;
+        VerticalLayout {
+            padding: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 10px;
+            Text { text: "Credits and licences"; color: Colors.text; }
+            Note {
+                text: "The digit shapes and the idea of reading the bar by shape come from Maple Classic Exp Overlay by beanguri (MIT licence). The levelling table is the game's public table. The map name is read with the text recognition built into Windows. This window is made with Slint:";
+            }
+            HorizontalLayout {
+                alignment: start;
+                AboutSlint { }
+            }
+        }
+    }
+}

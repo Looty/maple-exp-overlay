@@ -7,6 +7,8 @@ use crate::log::dlog;
 use crate::system::{self, wide};
 use maple_exp::anim::{self, Eased, Pop, Walkers};
 use maple_exp::config::{self, parse_hex, CaptureMode, Settings, APP_NAME};
+use maple_exp::editor;
+use maple_exp::map::{self, MapWatch, Maps};
 use maple_exp::reader::{diagnose, find_and_read, Reading, Templates};
 use maple_exp::text::commas;
 use maple_exp::tracker::{Stats, Tracker};
@@ -33,9 +35,12 @@ const POP_KEY: u32 = 0x00FF00FF; // the pop-up window's see-through colour (mage
 const SLOW_MS: u32 = 3000; // while no area is selected: just waiting for one
 const IDLE_MS: u32 = 5000; // while MapleStory isn't running
 const LOST_AFTER: u32 = 5; // failed looks in a row before saying the bar can't be read
+const MAP_SECS: f64 = 1.0; // how often the map name is looked at (a small grab and a hash: cheap)
+const MAP_CONFIRM_SECS: f64 = 0.2; // ...and how soon again after it changed, to confirm the new map quickly
 const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_SHOW: u32 = WM_APP + 2; // another launch of the exe asks this one to open the settings
 const WM_UNMINIMIZE: u32 = WM_APP + 3; // posted when Windows minimized the overlay (Win+D, Win+M, a taskbar click)
+pub const WM_PREVIEW: u32 = WM_APP + 4; // the settings window asks for "Preview effects"
 const ID_SETTINGS: usize = 1;
 const ID_RESET: usize = 2;
 const ID_TOGGLE: usize = 3;
@@ -101,7 +106,27 @@ struct App {
     size: (i32, i32),
     /// how far up the box sits to make room for the problem or pause message row (0 without one)
     status_shift: i32,
+    /// Each piece's width in `rows`, after the `fill` ones took the room their row leaves (see `refresh`).
+    widths: Vec<Vec<i32>>,
     fx: Fx,
+    map: MapState,
+}
+
+/// The map name in the minimap (see `maple_exp::map`).
+#[derive(Default)]
+struct MapState {
+    watch: MapWatch,
+    names: Maps,
+    mtime: Option<SystemTime>,
+    /// when the map area was last looked at
+    at: f64,
+    /// the last picture of it, and the fingerprint it gave
+    hash: u64,
+    last: Option<u64>,
+    /// maps already handed to `--read-map` in this run (each is read at most once a run)
+    tried: std::collections::HashSet<u64>,
+    /// another window is over the map area (looks are skipped meanwhile)
+    covered: bool,
 }
 
 thread_local!(static APP: RefCell<Option<App>> = const { RefCell::new(None) });
@@ -149,7 +174,57 @@ fn clock(secs: f64) -> String {
     format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
-type Row = Vec<(String, Tone)>;
+/// One piece of a row: text, or the EXP graph's bars.
+#[derive(Clone, PartialEq)]
+enum Seg {
+    Text(String),
+    /// One bar per look, oldest first, each 0..=`SPARK_LEVELS` tall; `NO_BAR` where there is no rate yet.
+    Bars(Vec<u8>),
+}
+
+/// One row of the overlay: its pieces, each with its colour and whether it fills the room the row leaves.
+type Row = Vec<(Seg, Tone, bool)>;
+
+const SPARK_LEVELS: u8 = 16;
+const NO_BAR: u8 = u8::MAX;
+
+/// The graph's bars; None before there is any rate. The session rate moves slowly, so the bars span the lowest to the
+/// highest rate shown (the trend, not the size): the lowest is a stub, the highest full height, and a rate that holds
+/// steady (within 0.5%) is a flat row at half height.
+fn spark_bars(st: &Stats) -> Option<Seg> {
+    if st.spark.iter().all(|v| v.is_none()) {
+        return None;
+    }
+    let (lo, hi) = st.spark.iter().flatten().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let level = |v: f32| {
+        if hi <= 0.0 {
+            0 // nothing gained yet: thin lines
+        } else if hi - lo <= hi * 0.005 {
+            SPARK_LEVELS / 2
+        } else {
+            2 + ((v - lo) / (hi - lo) * (SPARK_LEVELS - 2) as f32).round() as u8
+        }
+    };
+    Some(Seg::Bars(st.spark.iter().map(|v| v.map_or(NO_BAR, level)).collect()))
+}
+
+/// (bar width, gap) of the graph in pixels.
+fn bar_px(dpi: u32) -> (i32, i32) {
+    let px = (dpi as i32 / 96).max(1);
+    (2 * px, px)
+}
+
+impl Seg {
+    unsafe fn width(&self, dc: HDC, dpi: u32) -> i32 {
+        match self {
+            Seg::Text(t) => text_width(dc, t),
+            Seg::Bars(b) => {
+                let (w, gap) = bar_px(dpi);
+                b.len() as i32 * (w + gap) - gap
+            }
+        }
+    }
+}
 
 /// The next level is less than `anim_rainbow_min` minutes away (and farming hasn't paused).
 fn near_level_up(s: &Settings, st: &Stats) -> bool {
@@ -166,7 +241,7 @@ fn eta_minutes(s: &Settings, st: &Stats) -> Option<f64> {
 }
 
 /// The text of one item right now; None when there is nothing to say yet (it is then left out).
-fn item_text(id: &str, s: &Settings, st: &Stats, problem: bool) -> Option<String> {
+fn item_text(id: &str, s: &Settings, st: &Stats, problem: bool, map: Option<&str>) -> Option<String> {
     let num = |n: f64| if s.short_numbers { short(n) } else { commas(n.round() as u64) };
     match id {
         "exp_hr" => Some(match (st.exp_hr, st.pct_hr) {
@@ -185,12 +260,14 @@ fn item_text(id: &str, s: &Settings, st: &Stats, problem: bool) -> Option<String
         "gained" => st.gained_exp.map(|g| format!("Gained {}", num(g))),
         "gained_pct" => st.pct.map(|_| format!("Gained {:.2}%", st.gained_pct)),
         "elapsed" => Some(format!("Time {}", clock(st.active))),
+        "map" => map.map(str::to_string),
         _ => None,
     }
 }
 
 /// The overlay's rows, from the items the settings say to show, in their order: an item with `newline` starts a row.
-fn build_rows(s: &Settings, st: &Stats, status: &str) -> Vec<Row> {
+/// `map`: what the Map item says (None while no map name is seen).
+fn build_rows(s: &Settings, st: &Stats, status: &str, map: Option<&str>) -> Vec<Row> {
     let problem = if !status.is_empty() {
         Some(status.to_string())
     } else if st.paused {
@@ -202,18 +279,19 @@ fn build_rows(s: &Settings, st: &Stats, status: &str) -> Vec<Row> {
     let near = near_level_up(s, st);
     let mut rows: Vec<Row> = Vec::new();
     for it in s.items.iter().filter(|i| i.show) {
-        let Some(text) = item_text(&it.id, s, st, problem.is_some()) else { continue };
+        let seg = if it.id == "spark" { spark_bars(st) } else { item_text(&it.id, s, st, problem.is_some(), map).map(Seg::Text) };
+        let Some(seg) = seg else { continue };
         if it.newline || rows.is_empty() {
             rows.push(Vec::new());
         }
         let tone = if near && matches!(it.id.as_str(), "pct" | "level" | "eta") { TONE_RAINBOW } else { it.tone };
-        rows.last_mut().unwrap().push((text, tone));
+        rows.last_mut().unwrap().push((seg, tone, it.fill));
     }
     if let Some(p) = problem {
-        rows.insert(0, vec![(p, TONE_STATUS)]); // above the items, so the layout below keeps its place
+        rows.insert(0, vec![(Seg::Text(p), TONE_STATUS, false)]); // above the items, so the layout below keeps its place
     }
     if rows.is_empty() {
-        rows.push(vec![(APP_NAME.to_string(), TONE_STATUS)]); // everything switched off: never an empty box
+        rows.push(vec![(Seg::Text(APP_NAME.to_string()), TONE_STATUS, false)]); // everything switched off: never an empty box
     }
     rows
 }
@@ -261,6 +339,7 @@ impl App {
             self.last_reading = None;
             self.status = "Waiting for MapleStory...";
             self.tracker.observe(now, None);
+            self.map.watch = MapWatch::default(); // (no game, no map)
             self.templates = None;
             trim_memory();
             return;
@@ -315,6 +394,9 @@ impl App {
             }
         }
         self.tracker.observe(now, reading);
+        if self.game_up || capture::screen_forced() {
+            self.look_map(now);
+        }
         if !self.game_up {
             self.templates = None;
             trim_memory(); // give back what the pages touched by this look used: an idle overlay stays tiny
@@ -631,9 +713,21 @@ impl App {
             dlog!("fx: near level-up {near} (eta {:?} min, paused {})", eta_minutes(&self.s, &st), st.paused);
         }
         self.fx.near = near;
-        let rows = build_rows(&self.s, &st, status);
+        let map = self.map_text();
+        let rows = build_rows(&self.s, &st, status, map.as_deref());
         if self.fx.near && !self.fx.on {
             self.set_fx_timer(RAINBOW_MS);
+        }
+        // Windows can put back an older size behind our back (restoring the window after Win+D or a minimize brings back
+        // the size it had then), which shows as an empty row: when the window isn't the size it should be, fit it again
+        if !IsIconic(self.hwnd).is_positive() && self.size != (0, 0) {
+            let mut wr: RECT = zeroed();
+            GetWindowRect(self.hwnd, &mut wr);
+            if (wr.right - wr.left, wr.bottom - wr.top) != self.size {
+                dlog!("overlay size {:?} isn't {:?}: fitting it again", (wr.right - wr.left, wr.bottom - wr.top), self.size);
+                self.size = (0, 0);
+                self.rows.clear();
+            }
         }
         if rows == self.rows {
             if self.fx.on {
@@ -648,11 +742,11 @@ impl App {
         let mut tm: TEXTMETRICW = zeroed();
         GetTextMetricsW(dc, &mut tm);
         let gap = tm.tmAveCharWidth * 3;
-        let mut widest = 0;
-        for row in &self.rows {
-            let widths: i32 = row.iter().map(|(text, _)| text_width(dc, text)).sum();
-            widest = widest.max(widths + gap * (row.len() as i32 - 1));
-        }
+        // each piece's own width, then the `fill` ones take what their row leaves of the widest row
+        let own: Vec<Vec<(f32, bool)>> =
+            self.rows.iter().map(|row| row.iter().map(|(seg, _, fill)| (seg.width(dc, self.dpi) as f32, *fill)).collect()).collect();
+        self.widths = editor::stretch(&own, gap as f32).iter().map(|r| r.iter().map(|w| w.floor() as i32).collect()).collect();
+        let widest = self.widths.iter().map(|r| r.iter().sum::<i32>() + gap * (r.len() as i32 - 1)).max().unwrap_or(0);
         SelectObject(dc, old);
         ReleaseDC(self.hwnd, dc);
         let pad = 8 * self.dpi as i32 / 96;
@@ -696,25 +790,31 @@ impl App {
         for (i, row) in self.rows.iter().enumerate() {
             let mut x = pad;
             let y = pad - self.dpi as i32 / 96 * 2 + i as i32 * line;
-            for (text, tone) in row {
-                if *tone == TONE_RAINBOW {
-                    // one letter at a time, each its own colour along the wheel (red to violet)
-                    let n = text.chars().count().max(1) as f64;
-                    let phase = self.start.elapsed().as_secs_f64() * 0.4; // the colours drift along the letters
-                    for (k, ch) in text.chars().enumerate() {
-                        SetTextColor(mem, anim::rainbow(k as f64 / n * 0.85 + phase));
-                        let s = ch.to_string();
-                        let t: Vec<u16> = s.encode_utf16().collect();
-                        TextOutW(mem, x, y, t.as_ptr(), t.len() as i32);
-                        x += text_width(mem, &s);
+            for (j, (seg, tone, _)) in row.iter().enumerate() {
+                // (its width, stretched when it fills the row; a fill's text stays on the left of its room)
+                let w = self.widths.get(i).and_then(|r| r.get(j)).copied().unwrap_or_else(|| seg.width(mem, self.dpi));
+                match seg {
+                    Seg::Bars(bars) => self.paint_bars(mem, &tm, x, y, w, bars, *tone),
+                    Seg::Text(text) if *tone == TONE_RAINBOW => {
+                        // one letter at a time, each its own colour along the wheel (red to violet)
+                        let n = text.chars().count().max(1) as f64;
+                        let phase = self.start.elapsed().as_secs_f64() * 0.4; // the colours drift along the letters
+                        let mut cx = x;
+                        for (k, ch) in text.chars().enumerate() {
+                            SetTextColor(mem, anim::rainbow(k as f64 / n * 0.85 + phase));
+                            let s = ch.to_string();
+                            let t: Vec<u16> = s.encode_utf16().collect();
+                            TextOutW(mem, cx, y, t.as_ptr(), t.len() as i32);
+                            cx += text_width(mem, &s);
+                        }
                     }
-                    x += gap;
-                    continue;
+                    Seg::Text(text) => {
+                        SetTextColor(mem, rgb(config::tone_hex(&self.s, *tone)));
+                        let t: Vec<u16> = text.encode_utf16().collect();
+                        TextOutW(mem, x, y, t.as_ptr(), t.len() as i32);
+                    }
                 }
-                SetTextColor(mem, rgb(config::tone_hex(&self.s, *tone)));
-                let t: Vec<u16> = text.encode_utf16().collect();
-                TextOutW(mem, x, y, t.as_ptr(), t.len() as i32);
-                x += text_width(mem, text) + gap;
+                x += w + gap;
             }
         }
         SelectObject(mem, old_font);
@@ -723,6 +823,33 @@ impl App {
         DeleteObject(bmp);
         DeleteDC(mem);
         EndPaint(hwnd, &ps);
+    }
+
+    /// The EXP/h graph at (x, y), `width` wide, standing on the text's baseline and as tall as its capital letters.
+    /// Older looks are in the item's colour, the newest in the main colour; a zero rate is a thin line.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn paint_bars(&self, dc: HDC, tm: &TEXTMETRICW, x: i32, y: i32, width: i32, bars: &[u8], tone: Tone) {
+        let (_, gap) = bar_px(self.dpi);
+        // each bar gets an equal share of the width (the gaps stay thin, the bars widen)
+        let slot = (width + gap) as f32 / bars.len().max(1) as f32;
+        let px = (self.dpi as i32 / 96).max(1);
+        let base = y + tm.tmAscent;
+        let full = (tm.tmAscent - tm.tmInternalLeading).max(4 * px);
+        let now_tone = if tone == 0 { 1 } else { 0 };
+        let done = CreateSolidBrush(rgb(config::tone_hex(&self.s, tone)));
+        let now = CreateSolidBrush(rgb(config::tone_hex(&self.s, now_tone)));
+        for (i, &lv) in bars.iter().enumerate() {
+            if lv == NO_BAR {
+                continue;
+            }
+            let h = if lv == 0 { px } else { (full * lv as i32 / SPARK_LEVELS as i32).max(2 * px) };
+            let left = x + (i as f32 * slot).round() as i32;
+            let right = x + ((i + 1) as f32 * slot).round() as i32 - gap;
+            let r = RECT { left, top: base - h, right: right.max(left + 1), bottom: base };
+            FillRect(dc, &r, if i + 1 == bars.len() { now } else { done });
+        }
+        DeleteObject(done);
+        DeleteObject(now);
     }
 
     /// The snails: a see-through strip as wide as the overlay, standing on its top edge (or hanging under it when there
@@ -857,6 +984,77 @@ impl App {
             self.s = Settings::load();
             self.apply();
         }
+        // a map was named in the settings window
+        let m = map::modified();
+        if m != self.map.mtime {
+            self.map.mtime = m;
+            self.map.names = Maps::load();
+            self.refresh();
+        }
+    }
+
+    // ------------------------------------------------------------ the map
+
+    /// Every few seconds while the game is up: which map the name in the map area says. Never touches the EXP status.
+    unsafe fn look_map(&mut self, now: f64) {
+        let Some([x, y, w, h]) = self.s.map_region else {
+            self.map.watch = MapWatch::default();
+            return;
+        };
+        let wait = if self.map.watch.unsettled() { MAP_CONFIRM_SECS } else { MAP_SECS };
+        if now - self.map.at < wait {
+            return;
+        }
+        self.map.at = now;
+        let (frame, via) = grab(self.s.capture == CaptureMode::Window, x, y, w, h);
+        // read from the screen, the box shows whatever window is on top there: only trust it while that is the game
+        // (another window over the minimap would be taken for a new map). The game needn't be the active window.
+        let covered = via == "screen"
+            && !capture::screen_forced()
+            && !capture::game_shows_at(x, y, w, h, &[self.hwnd, self.fx.pop_hwnd, self.fx.walker_hwnd]);
+        if covered != self.map.covered {
+            self.map.covered = covered;
+            dlog!("map: area {}", if covered { "covered by another window: not looked at" } else { "shows the game again" });
+        }
+        if covered {
+            return;
+        }
+        let fp = match &frame {
+            Some(f) => {
+                let hsh = hash(f);
+                if hsh != self.map.hash {
+                    self.map.hash = hsh;
+                    self.map.last = map::fingerprint(f); // (only worked out again when the picture changed)
+                    dlog!("map: area changed, name {:?}", self.map.last.map(map::hex));
+                }
+                self.map.last
+            }
+            None => None,
+        };
+        if self.map.watch.see(fp) {
+            dlog!("map: {:?} ({:?})", self.map.watch.current.map(map::hex), self.map_text());
+            if let Some(fp) = self.map.watch.current {
+                map::save_last(fp); // (shown straight away the next time the overlay starts)
+            }
+            // a map with no text for good yet: have it read, once per run of the overlay (its own short process, so
+            // the OCR never lives here; the result lands in maps.json, which `check_config` picks up)
+            if let Some(fp) = self.map.watch.current {
+                let sure = self.map.names.text(fp).is_some_and(|(_, sure)| sure);
+                if !sure && self.map.tried.insert(fp) {
+                    if let Ok(exe) = std::env::current_exe() {
+                        dlog!("map: reading {}", map::hex(fp));
+                        let _ = std::process::Command::new(exe).arg("--read-map").arg(map::hex(fp)).spawn();
+                    }
+                }
+            }
+        }
+    }
+
+    /// What the Map item says: the map's name, "Map ..." while it is being read (or couldn't be), None while no map
+    /// name is seen.
+    fn map_text(&self) -> Option<String> {
+        let fp = self.map.watch.current?;
+        Some(self.map.names.name(fp).map_or_else(|| "Map ...".to_string(), str::to_string))
     }
 }
 
@@ -939,9 +1137,34 @@ unsafe fn show_menu(hwnd: HWND) {
         }
         ID_TOGGLE => toggle_visible(),
         ID_QUIT => {
+            close_helpers();
             DestroyWindow(hwnd);
         }
         _ => {}
+    }
+}
+
+/// Quit means all of it: the settings window and the area picker run as processes of their own, so close them too
+/// (or the settings window would stay open, in the taskbar, after the overlay is gone).
+unsafe fn close_helpers() {
+    for (class, title) in [(None, Some(crate::settings_ui::TITLE)), (Some("MapleExpSelector"), None)] {
+        let (c, t) = (class.map(wide), title.map(wide));
+        loop {
+            let h = FindWindowW(c.as_ref().map_or(null(), |c| c.as_ptr()), t.as_ref().map_or(null(), |t| t.as_ptr()));
+            if h.is_null() {
+                break;
+            }
+            PostMessageW(h, WM_CLOSE, 0, 0);
+            // (wait for it to go, so the loop doesn't find the same window again; give up after a second)
+            let mut waited = 0;
+            while IsWindow(h) != 0 && waited < 1000 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                waited += 20;
+            }
+            if IsWindow(h) != 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -1016,6 +1239,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     WM_LBUTTONDBLCLK => open_settings(),
                     _ => {}
                 }
+                0
+            }
+            WM_PREVIEW => {
+                with_app(|app| app.preview_fx());
                 0
             }
             WM_SHOW => {
@@ -1194,6 +1421,7 @@ pub fn run() {
                 tray_on: false,
                 size: (0, 0),
                 status_shift: 0,
+                widths: Vec::new(),
                 fx: Fx {
                     on: false,
                     ms: 0,
@@ -1208,6 +1436,14 @@ pub fn run() {
                     pop_font: null_mut(),
                     pop_size: (0, 0),
                     eased: [Eased::default(); 4],
+                },
+                // (the map last seen shows at once; the looks take over from there)
+                map: MapState {
+                    watch: MapWatch::from(map::load_last()),
+                    names: Maps::load(),
+                    mtime: map::modified(),
+                    at: -MAP_SECS,
+                    ..MapState::default()
                 },
             })
         });
@@ -1247,6 +1483,7 @@ pub fn dump() {
         let ((gx, gy, gw, gh), has_game) = game_rect();
         let mut log = format!("game window found: {has_game}; client rect on screen: {gx},{gy} {gw}x{gh}\n");
         log += &format!("game window in front: {}\nselected area: {:?}\n", capture::game_in_front(), s.region);
+        log += &format!("HDR on the game's screen: {:?}\nmap area: {:?}\n", capture::hdr_on(), s.map_region);
         let (x, y, w, h) = s.region.map_or((gx, gy, gw, gh), |r| (r[0], r[1], r[2], r[3]));
         log += &format!("capture mode: {:?}\n", s.capture);
         // both ways of capturing, whatever the mode, so it is clear which one can see the bar
@@ -1269,6 +1506,24 @@ pub fn dump() {
         }
         if s.region.is_none() {
             log += "no area selected yet: Settings > Capture > Select area (the whole game window was captured above)\n";
+        }
+        // the map area too: as the overlay sees it, and as --read-map reads it (true colours, then Windows' OCR)
+        if let (Some(area), Some(dir)) = (s.map_region, config::dir()) {
+            let [x, y, w, h] = area;
+            let (frame, via) = grab(false, x, y, w, h);
+            log += &format!("map area via {via}: {:?}\n", frame.as_ref().map(|f| (f.w, f.h, map::fingerprint(f).map(map::hex))));
+            if let Some(f) = frame {
+                save_bmp(&dir.join("dump-map-screen.bmp"), &f);
+            }
+            log += &format!("map area shows the game (not covered): {}\n", capture::game_shows_at(x, y, w, h, &[]));
+            let r = crate::map_reader::read(area);
+            log += &format!("map read: {:?} / {:?} (sure: {})\n", r.small, r.large, r.agreed().is_some());
+            if let Some(f) = &r.frame {
+                save_bmp(&dir.join("dump-map-true.bmp"), f);
+                if let Some(m) = map::mask(f) {
+                    save_bmp(&dir.join("dump-map-ocr.bmp"), &map::ocr_picture(f, &m, 1.0));
+                }
+            }
         }
         if let Some(dir) = config::dir() {
             let _ = std::fs::write(dir.join("dump.txt"), &log);

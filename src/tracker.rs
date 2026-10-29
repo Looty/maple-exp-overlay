@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 
 const MAX_STEP: f64 = 5.0; // longest stretch of time one look can add (a stalled capture adds nothing)
 const MAX_JUMP: f64 = 25.0; // a bigger percent jump in one look isn't farming: start over from it
+/// Bars in the EXP/h graph: one per look at the bar, the newest last.
+pub const SPARK_BARS: usize = 30;
 
 pub struct Tracker {
     /// No gain for this many seconds: paused, and the idle time isn't counted.
@@ -28,6 +30,8 @@ pub struct Tracker {
     last_tick: f64,
     last_gain: f64,
     gains: VecDeque<(f64, f64, f64)>, // (active time, exp, pct)
+    /// The EXP/h (or %/h) after each of the last `SPARK_BARS` looks that read the bar, for the graph.
+    rates: VecDeque<f32>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -53,6 +57,9 @@ pub struct Stats {
     pub active: f64,
     /// Seconds since the bar last changed (EXP came in, or the first reading); None before any reading.
     pub since_gain: Option<f64>,
+    /// The rate after each of the last `SPARK_BARS` looks, oldest first: EXP/h when the bar shows the number, else
+    /// %/h. None where there is no rate yet (the start of a session).
+    pub spark: [Option<f32>; SPARK_BARS],
 }
 
 impl Default for Tracker {
@@ -72,6 +79,7 @@ impl Default for Tracker {
             last_tick: 0.0,
             last_gain: 0.0,
             gains: VecDeque::new(),
+            rates: VecDeque::new(),
         }
     }
 }
@@ -90,8 +98,20 @@ impl Tracker {
         };
     }
 
-    /// One look at the bar at time `t` (seconds, monotonic); None if it couldn't be read.
+    /// One look at the bar at time `t` (seconds, monotonic); None if it couldn't be read. A look that read the bar
+    /// adds a bar to the graph.
     pub fn observe(&mut self, t: f64, r: Option<Reading>) {
+        let read = r.is_some();
+        self.take(t, r);
+        if let (true, Some(rate)) = (read, self.rate()) {
+            self.rates.push_back(rate as f32);
+            if self.rates.len() > SPARK_BARS {
+                self.rates.pop_front();
+            }
+        }
+    }
+
+    fn take(&mut self, t: f64, r: Option<Reading>) {
         if self.last.is_some() && t - self.last_gain <= self.idle {
             self.active += (t - self.last_tick).clamp(0.0, MAX_STEP);
         }
@@ -122,6 +142,7 @@ impl Tracker {
             self.has_exp = false;
             self.active = 0.0;
             self.gains.clear();
+            self.rates.clear();
             self.last_tick = t;
             self.accept(t, r);
             return;
@@ -143,6 +164,11 @@ impl Tracker {
                 self.gains.pop_front();
             }
         }
+    }
+
+    /// The session's rate now: EXP/h when the bar shows the number, else %/h; None for the first seconds.
+    fn rate(&self) -> Option<f64> {
+        (self.active >= 10.0).then(|| if self.has_exp { self.gained_exp } else { self.gained_pct } * 3600.0 / self.active)
     }
 
     fn accept(&mut self, t: f64, r: Reading) {
@@ -227,6 +253,11 @@ impl Tracker {
             s.eta_recent_min = eta(s.exp_5m, recent_hr);
         }
         s.level = self.level;
+        // (right-aligned: the newest look is the last bar)
+        let skip = SPARK_BARS - self.rates.len();
+        for (slot, &v) in s.spark[skip..].iter_mut().zip(&self.rates) {
+            *slot = Some(v);
+        }
         s
     }
 }
@@ -321,6 +352,37 @@ mod session_tests {
         }
         let g = t.stats(783.0).gained_exp.unwrap();
         assert!((2_800.0..4_000.0).contains(&g), "{g}");
+    }
+
+    #[test]
+    fn graph_has_a_bar_per_look_with_the_rate_then() {
+        let mut t = Tracker::default();
+        let mut exp = 20_000u64;
+        let rd = |e: u64| Some(Reading { exp: Some(e), pct: (e as f64 / 122_760.0 * 10_000.0).round() / 100.0 });
+        // 100 EXP every 2 s (180k/h), a look every second; no rate (so no bar) for the first 10 s
+        for s in 0..15 {
+            if s % 2 == 0 && s > 0 {
+                exp += 100;
+            }
+            t.observe(s as f64, rd(exp));
+        }
+        let g = t.stats(15.0).spark;
+        let shown = g.iter().flatten().count();
+        assert!((3..=6).contains(&shown) && g[SPARK_BARS - 1].is_some() && g[0].is_none(), "{g:?}");
+        // a look that couldn't read the bar adds nothing; later ones fill the graph, the newest last
+        t.observe(15.0, None);
+        assert_eq!(t.stats(15.0).spark.iter().flatten().count(), shown);
+        for s in 16..60 {
+            if s % 2 == 0 {
+                exp += 100;
+            }
+            t.observe(s as f64, rd(exp));
+        }
+        let g = t.stats(60.0).spark;
+        assert!(g.iter().all(|v| v.is_some_and(|r| (120_000.0..240_000.0).contains(&r))), "{g:?}");
+        // a reset forgets the bars
+        t.reset();
+        assert!(t.stats(61.0).spark.iter().all(|v| v.is_none()));
     }
 
     /// A ten-minute grind on a level of 122,760 EXP: a kill every 3 s worth 165 EXP (about 200k/h), a look every second.
