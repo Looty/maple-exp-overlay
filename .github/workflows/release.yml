@@ -29,6 +29,23 @@ jobs:
             exit 1
           }
 
+      # The release notes are this version's entry in CHANGELOG.md (the same text the app shows under What's new).
+      - name: Release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $lines = @(Get-Content CHANGELOG.md -Encoding utf8)
+          $head = $lines | Select-String -Pattern "^## $([regex]::Escape($version)) - \d{4}-\d{2}-\d{2}\s*$" | Select-Object -First 1
+          if (-not $head) { Write-Error "CHANGELOG.md has no '## $version - YYYY-MM-DD' entry (rename Unreleased to it)"; exit 1 }
+          $body = @()
+          foreach ($line in $lines[$head.LineNumber..($lines.Count - 1)]) {
+            if ($line -match '^## ') { break }
+            $body += $line
+          }
+          $notes = ($body -join "`n").Trim()
+          if (-not $notes) { Write-Error "CHANGELOG.md's entry for $version is empty"; exit 1 }
+          $notes | Out-File -Encoding utf8 release-notes.md
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -45,7 +62,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $name = "maple-exp-overlay-$tag-windows-x64"
           New-Item -ItemType Directory -Path $name | Out-Null
-          Copy-Item target/release/maple-exp-overlay.exe, README.md, LICENSE, NOTICE -Destination $name
+          Copy-Item target/release/maple-exp-overlay.exe, README.md, CHANGELOG.md, LICENSE, NOTICE -Destination $name
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
@@ -88,4 +105,4 @@ jobs:
             ${{ env.ASSET }}.sha256
             maple-exp-overlay.exe
             maple-exp-overlay.exe.minisig
-          generate_release_notes: true
+          body_path: release-notes.md

@@ -100,6 +100,9 @@ pub struct Settings {
     pub start_hidden: bool,
     /// The settings window looks for a new version when it opens, and gets it ready to install.
     pub update_check: bool,
+    /// The newest version whose changes were opened on What's new; a newer one puts a dot on it. Settings file only.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub seen_changes: String,
 }
 
 /// The fastest the bar is looked at.
@@ -146,6 +149,7 @@ impl Default for Settings {
             anim_rainbow_min: 30,
             start_hidden: false,
             update_check: true,
+            seen_changes: String::new(),
         }
     }
 }

@@ -3,7 +3,7 @@
 
 import { Palette } from "std-widgets.slint";
 import { Colors, NavItem } from "widgets.slint";
-import { Cfg, Chip, PreviewItem, PreviewRow } from "types.slint";
+import { ChangeRelease, ChangeSection, Cfg, Chip, PreviewItem, PreviewRow } from "types.slint";
 import { OverlayPage } from "pages/overlay.slint";
 import { LayoutPage } from "pages/layout.slint";
 import { DataPage } from "pages/data.slint";
@@ -11,8 +11,9 @@ import { CapturePage } from "pages/capture.slint";
 import { EffectsPage } from "pages/effects.slint";
 import { GeneralPage } from "pages/general.slint";
 import { AboutPage } from "pages/about.slint";
+import { WhatsNewPage } from "pages/whats-new.slint";
 
-export { Cfg, Chip, PreviewItem, PreviewRow }
+export { ChangeRelease, ChangeSection, Cfg, Chip, PreviewItem, PreviewRow }
 
 export component SettingsWindow inherits Window {
     title: "Maple EXP Overlay - Settings";
@@ -26,8 +27,14 @@ export component SettingsWindow inherits Window {
     min-height: 600px;
     init => { Palette.color-scheme = ColorScheme.dark; }
 
-    /// The page showing: 0 Overlay, 1 Layout, 2 Data, 3 Capture, 4 Effects, 5 General, 6 About.
+    /// The page showing: 0 Overlay, 1 Layout, 2 Data, 3 Capture, 4 Effects, 5 General, 6 About, 7 What's new.
     in-out property <int> page: 0;
+    /// Every version's changes, newest first (What's new).
+    in property <[ChangeRelease]> releases;
+    /// A version the user hasn't seen the changes of: a dot on What's new until it's opened.
+    in-out property <bool> news-dot;
+    /// What's new was opened (the dot goes; Rust saves that the newest version was seen).
+    callback news-seen();
 
     in-out property <Cfg> cfg;
     in property <[string]> fonts;
@@ -177,6 +184,19 @@ export component SettingsWindow inherits Window {
                 Rectangle { height: 1px; background: #2e2e2c; }
                 Rectangle { height: 6px; }
                 NavItem {
+                    label: "What's new";
+                    icon: "M3.5 2.5 H12.5 V13.5 H3.5 Z M5.5 5.5 H10.5 M5.5 8 H10.5 M5.5 10.5 H8.5";
+                    selected: root.page == 7;
+                    dot: root.news-dot;
+                    clicked => {
+                        root.page = 7;
+                        if root.news-dot {
+                            root.news-dot = false;
+                            root.news-seen();
+                        }
+                    }
+                }
+                NavItem {
                     label: "About";
                     icon: "M2 8 A6 6 0 1 0 14 8 A6 6 0 1 0 2 8 Z M8 7.5 V11 M8 5 V5.3";
                     selected: root.page == 6;
@@ -281,6 +301,10 @@ export component SettingsWindow inherits Window {
                 check-update => { root.check-update(); }
                 install-update => { root.install-update(); }
                 open-releases => { root.open-releases(); }
+            }
+            if root.page == 7: WhatsNewPage {
+                releases: root.releases;
+                version: root.version;
             }
         }
     }

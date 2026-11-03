@@ -38,6 +38,20 @@ export struct Cfg {
     update-check: bool,
 }
 
+/// A list in one version's changes ("NEW", "IMPROVED", "FIXED").
+export struct ChangeSection {
+    title: string,
+    items: [string],
+}
+
+/// One version on the What's new page (see src/changelog.rs).
+export struct ChangeRelease {
+    version: string,
+    /// "October 29, 2026"
+    date: string,
+    sections: [ChangeSection],
+}
+
 /// One piece of the overlay preview: a sample of what the item shows, or the EXP/h graph's bars.
 export struct PreviewItem {
     text: string,

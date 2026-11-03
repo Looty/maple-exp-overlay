@@ -2,6 +2,7 @@
 //! the binary (src/main.rs) does the Win32 side (capture, overlay window, settings window).
 
 pub mod anim;
+pub mod changelog;
 pub mod config;
 pub mod editor;
 pub mod exp_table;
