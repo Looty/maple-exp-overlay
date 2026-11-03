@@ -101,6 +101,7 @@ impl Tracker {
     /// One look at the bar at time `t` (seconds, monotonic); None if it couldn't be read. A look that read the bar
     /// adds a bar to the graph.
     pub fn observe(&mut self, t: f64, r: Option<Reading>) {
+        let r = r.filter(|&r| self.fits(r));
         let read = r.is_some();
         self.take(t, r);
         if let (true, Some(rate)) = (read, self.rate()) {
@@ -164,6 +165,15 @@ impl Tracker {
                 self.gains.pop_front();
             }
         }
+    }
+
+    /// Whether a reading's EXP number and percentage agree with the level's size (or the next level's, for a level up).
+    /// A misread digit breaks that. Such a reading counts as unread: it repeats while the bar doesn't change, so two
+    /// looks agreeing doesn't catch it, and the climb to it would count as a gain while the drop back wouldn't.
+    pub fn fits(&self, r: Reading) -> bool {
+        let (Some(exp), Some(level)) = (r.exp, self.level) else { return true };
+        let shows = |l: u32| exp_to_next(l).is_some_and(|need| exp <= need && (exp as f64 / need as f64 * 100.0 - r.pct).abs() <= 0.011);
+        shows(level) || shows(level + 1) || level_for(exp, r.pct).is_some()
     }
 
     /// The session's rate now: EXP/h when the bar shows the number, else %/h; None for the first seconds.
@@ -383,6 +393,41 @@ mod session_tests {
         // a reset forgets the bars
         t.reset();
         assert!(t.stats(61.0).spark.iter().all(|v| v.is_none()));
+    }
+
+    /// Level 41 (324,240 EXP) at about 85k/h; for a few looks the number is misread 50,000 too high (one wrong digit, the
+    /// percentage right). That must not count: before, the climb to it counted and the drop back didn't.
+    #[test]
+    fn a_misread_number_adds_nothing() {
+        let req = 324_240u64;
+        let rd = |e: u64| Some(Reading { exp: Some(e), pct: (e as f64 / req as f64 * 10_000.0).round() / 100.0 });
+        let mut t = Tracker::default();
+        let mut exp = 10_000u64;
+        for sec in 0..600 {
+            if sec % 6 == 0 && sec > 0 {
+                exp += 142; // 85,200/h
+            }
+            let mut r = rd(exp);
+            if (300..304).contains(&sec) {
+                r = Some(Reading { exp: Some(exp + 50_000), ..r.unwrap() });
+            }
+            t.observe(sec as f64, r);
+        }
+        let s = t.stats(600.0);
+        assert_eq!(s.level, Some(41));
+        let hr = s.exp_hr.unwrap();
+        assert!((hr - 85_200.0).abs() < 8_000.0, "EXP/h should be near 85k: {hr}");
+        let by_pct = s.gained_pct / 100.0 * req as f64;
+        assert!((s.gained_exp.unwrap() - by_pct).abs() < 1_000.0, "{s:?}");
+        // a level up still counts (the new level's number fits the next level's size)
+        t.observe(600.0, rd(req - 100));
+        t.observe(601.0, rd(req - 100));
+        let before = t.gained_exp;
+        let next = Some(Reading { exp: Some(500), pct: 0.14 }); // 500 / 356,916
+        t.observe(602.0, next);
+        t.observe(603.0, next);
+        assert!((t.gained_exp - before - 600.0).abs() < 1.0, "{}", t.gained_exp - before);
+        assert_eq!(t.stats(603.0).level, Some(42));
     }
 
     /// A ten-minute grind on a level of 122,760 EXP: a kill every 3 s worth 165 EXP (about 200k/h), a look every second.

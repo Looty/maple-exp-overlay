@@ -102,6 +102,9 @@ struct App {
     hidden: bool,
     /// Hidden by itself for being idle (see `Settings::hide_idle`).
     auto_hidden: bool,
+    /// When the user last asked to see it (seconds since start): idle hiding counts from here too, so the
+    /// overlay stays up for `hide_after_secs` instead of going again at the next look.
+    shown_at: f64,
     tray_on: bool,
     size: (i32, i32),
     /// how far up the box sits to make room for the problem or pause message row (0 without one)
@@ -430,7 +433,7 @@ impl App {
 
     /// Compares this reading with the last one: EXP that came in starts a snail and the pop-up.
     unsafe fn note_gain(&mut self, reading: Option<Reading>, now: f64) {
-        let Some(r) = reading else { return };
+        let Some(r) = reading.filter(|&r| self.tracker.fits(r)) else { return }; // (a misread isn't a kill)
         let prev = self.fx.prev.replace(r);
         let Some(p) = prev.filter(|_| self.s.anim_pop || self.s.anim_snail) else { return };
         let gain = match (r.exp, p.exp) {
@@ -662,8 +665,7 @@ impl App {
 
         // the tray icon is the way back to the settings when the overlay is locked, so hiding needs it
         if s.tray && !self.tray_on {
-            add_tray_icon(self.hwnd);
-            self.tray_on = true;
+            self.tray_on = add_tray_icon(self.hwnd); // (if it failed, `check_config` tries again every second)
         } else if !s.tray && self.tray_on {
             remove_tray_icon(self.hwnd);
             self.tray_on = false;
@@ -698,8 +700,13 @@ impl App {
             self.fx_apply(&mut st, now);
         }
         // hide by itself when nothing has come in for a while, and come back with the next EXP
-        let idle_for = st.since_gain.unwrap_or(now);
-        let want_hidden = self.s.hide_idle && idle_for >= self.s.hide_after_secs as f64;
+        let idle_for = st.since_gain.unwrap_or(now).min(now - self.shown_at);
+        let mut want_hidden = self.s.hide_idle && idle_for >= self.s.hide_after_secs as f64;
+        // not while the settings window is open (it changes how the overlay looks), nor for a while after it closes
+        if want_hidden && !FindWindowW(null(), wide(crate::settings_ui::TITLE).as_ptr()).is_null() {
+            self.shown_at = now;
+            want_hidden = false;
+        }
         if want_hidden != self.auto_hidden {
             self.auto_hidden = want_hidden;
             self.sync_visibility();
@@ -991,6 +998,11 @@ impl App {
             self.map.names = Maps::load();
             self.refresh();
         }
+        // the tray icon couldn't be added yet (autostart at login can beat the taskbar): without it a hidden
+        // overlay would be running with no way back to it
+        if self.s.tray && !self.tray_on {
+            self.tray_on = add_tray_icon(self.hwnd);
+        }
     }
 
     // ------------------------------------------------------------ the map
@@ -1070,7 +1082,11 @@ unsafe fn app_icon() -> HICON {
     }
 }
 
-unsafe fn add_tray_icon(hwnd: HWND) {
+/// "TaskbarCreated": Explorer broadcasts it when the taskbar (re)starts, and every tray icon is gone then.
+static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Adds the tray icon; false when the taskbar isn't there yet (at login, or while Explorer restarts).
+unsafe fn add_tray_icon(hwnd: HWND) -> bool {
     let mut nid: NOTIFYICONDATAW = zeroed();
     nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
@@ -1081,7 +1097,8 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     for (i, c) in APP_NAME.encode_utf16().enumerate() {
         nid.szTip[i] = c;
     }
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    // (an icon that is somehow still there only needs updating)
+    Shell_NotifyIconW(NIM_ADD, &nid) != 0 || Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
 }
 
 unsafe fn remove_tray_icon(hwnd: HWND) {
@@ -1105,6 +1122,7 @@ unsafe fn toggle_visible() {
         app.hidden = !app.hidden;
         if !app.hidden {
             app.auto_hidden = false; // asked to see it: show it now, even if it was hidden for being idle
+            app.shown_at = app.start.elapsed().as_secs_f64();
         }
         app.sync_visibility();
     });
@@ -1247,6 +1265,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_SHOW => {
                 with_app(|app| {
+                    app.shown_at = app.start.elapsed().as_secs_f64();
                     if app.hidden || app.auto_hidden {
                         app.hidden = false;
                         app.auto_hidden = false;
@@ -1282,6 +1301,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                 });
                 PostQuitMessage(0);
+                0
+            }
+            m if m != 0 && m == TASKBAR_CREATED.load(std::sync::atomic::Ordering::Relaxed) => {
+                with_app(|app| app.tray_on = app.s.tray && add_tray_icon(hwnd));
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1370,6 +1393,7 @@ pub fn run() {
             ..zeroed()
         };
         RegisterClassW(&wc);
+        TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), std::sync::atomic::Ordering::Relaxed);
         let pop_class = wide(POP_CLASS);
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(pop_proc), hInstance: hinst, lpszClassName: pop_class.as_ptr(), ..zeroed() });
         let walker_class = wide(WALKER_CLASS);
@@ -1418,6 +1442,7 @@ pub fn run() {
                 hwnd,
                 hidden,
                 auto_hidden: false,
+                shown_at: 0.0,
                 tray_on: false,
                 size: (0, 0),
                 status_shift: 0,

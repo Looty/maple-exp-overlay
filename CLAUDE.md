@@ -16,7 +16,8 @@ cargo clippy --all-targets -- -D warnings   # CI enforces zero clippy warnings
 - Release builds use `windows_subsystem = "windows"` and `panic = "abort"`: a panic shows up only as exit code `0xc0000409`. Use a debug build (`cargo run`) to see messages.
 - A running overlay locks its exe; quit it from the tray before rebuilding. If the linker can't open files, use a short `CARGO_TARGET_DIR`.
 - `.cargo/config.toml` is local-only (gitignored) and remaps build paths so no local paths end up in the binary; CI sets the same through `RUSTFLAGS`. Never commit it.
-- Releases: bump `version` in `Cargo.toml`, tag `vX.Y.Z`, push the tag (see `.github/workflows/release.yml`). CI signs the bare exe with minisign for the in-app updater, so the `MINISIGN_SECRET_KEY` repository secret must exist or the release fails; its public half is `update::PUBLIC_KEY`.
+- Changelog: every user-visible change gets a line under `## Unreleased` in `CHANGELOG.md` (New / Improved / Fixed, written for players). It is built into the app (`changelog.rs`, the settings window's What's new page) and becomes the GitHub release notes.
+- Releases: rename `## Unreleased` to `## X.Y.Z - YYYY-MM-DD` (a test fails if `Cargo.toml`'s version has no entry), bump `version` in `Cargo.toml`, tag `vX.Y.Z`, push the tag (see `.github/workflows/release.yml`). CI signs the bare exe with minisign for the in-app updater, so the `MINISIGN_SECRET_KEY` repository secret must exist or the release fails; its public half is `update::PUBLIC_KEY`.
 - `cargo test -- --ignored` also runs a live download from GitHub through the updater's WinHTTP code.
 - Modes of the one exe: no argument = overlay, `--settings`, `--select-area`, `--dump` (writes `dump.txt` and pictures to `%APPDATA%\MapleExpOverlay`), `--screen` (ignore the game window).
 

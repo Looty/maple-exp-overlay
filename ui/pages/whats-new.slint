@@ -1,0 +1,61 @@
+// What's new: the changes in each version, newest first (CHANGELOG.md, built in; see src/changelog.rs).
+
+import { Card, Colors, Page } from "../widgets.slint";
+import { ChangeRelease } from "../types.slint";
+
+export component WhatsNewPage inherits Page {
+    in property <[ChangeRelease]> releases;
+    /// the running version ("0.5.0"): its card says so
+    in property <string> version;
+    title: "What's new";
+
+    for r in root.releases: VerticalLayout {
+        padding-bottom: 12px;
+        Card {
+            VerticalLayout {
+                padding: 20px;
+                padding-top: 16px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: r.date;
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: Colors.text;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    if r.version == root.version: Text { text: "Your version"; color: Colors.hint; font-size: 12px; vertical-alignment: center; }
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 24px;
+                            width: pill.preferred-width + 20px;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: r.version == root.version ? Colors.accent : Colors.control-border;
+                            pill := Text {
+                                text: r.version;
+                                font-family: "Consolas";
+                                font-size: 13px;
+                                color: r.version == root.version ? Colors.accent : Colors.hint;
+                            }
+                        }
+                    }
+                }
+                for s in r.sections: VerticalLayout {
+                    padding-top: 10px;
+                    spacing: 8px;
+                    Text { text: s.title; font-size: 12px; font-weight: 600; color: Colors.hint; }
+                    for item in s.items: HorizontalLayout {
+                        padding-left: 4px;
+                        spacing: 10px;
+                        Text { text: "•"; color: #cfcfcf; }
+                        Text { text: item; wrap: word-wrap; color: #e6e6e6; horizontal-stretch: 1; }
+                    }
+                }
+            }
+        }
+    }
+}

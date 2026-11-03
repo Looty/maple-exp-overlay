@@ -70,6 +70,17 @@ fn edit(settings: &Shared, f: impl FnOnce(&mut Settings)) {
     s.save();
 }
 
+fn to_change_release(r: &maple_exp::changelog::Release) -> ChangeRelease {
+    let strings = |v: &[String]| ModelRc::new(VecModel::from(v.iter().map(SharedString::from).collect::<Vec<_>>()));
+    let sections: Vec<ChangeSection> =
+        r.sections.iter().map(|s| ChangeSection { title: s.title.to_uppercase().into(), items: strings(&s.items) }).collect();
+    ChangeRelease {
+        version: r.version.as_str().into(),
+        date: if r.unreleased() { "Not released yet".into() } else { maple_exp::changelog::long_date(&r.date).into() },
+        sections: ModelRc::new(VecModel::from(sections)),
+    }
+}
+
 fn to_cfg(s: &Settings) -> Cfg {
     let [px, py] = s.pos.unwrap_or([24, 24]);
     Cfg {
@@ -505,7 +516,7 @@ fn take_shots(ui: &SettingsWindow, window: &slint::platform::software_renderer::
         ui.set_update_ready("v0.5.0".into()); // (so the update button is in the pictures; --no-update leaves it out)
     }
     let _ = std::fs::create_dir_all(dir);
-    for page in 0..7 {
+    for page in 0..8 {
         ui.set_page(page);
         let mut px = vec![slint::Rgb8Pixel::default(); (w * h) as usize];
         // (a couple of passes: the first lays out what the page change created)
@@ -563,6 +574,15 @@ pub fn run() {
     ui.set_themes(ModelRc::new(VecModel::from(THEMES.iter().map(|t| SharedString::from(t.0)).collect::<Vec<_>>())));
     ui.set_layouts(ModelRc::new(VecModel::from(LAYOUTS.iter().map(|l| SharedString::from(l.0)).collect::<Vec<_>>())));
     ui.set_version(env!("CARGO_PKG_VERSION").into());
+    let releases = maple_exp::changelog::releases();
+    ui.set_releases(ModelRc::new(VecModel::from(releases.iter().map(to_change_release).collect::<Vec<_>>())));
+    // (the dot is for released versions: Unreleased shows only in debug builds)
+    let newest = releases.iter().find(|r| !r.unreleased()).map(|r| r.version.clone()).unwrap_or_default();
+    ui.set_news_dot(!newest.is_empty() && settings.borrow().seen_changes != newest);
+    ui.on_news_seen({
+        let settings = settings.clone();
+        move || edit(&settings, |s| s.seen_changes = newest.clone())
+    });
     // nothing is read until an area is selected, so a first run opens on the tab where that is done
     if settings.borrow().region.is_none() {
         ui.set_page(3); // (Capture)
