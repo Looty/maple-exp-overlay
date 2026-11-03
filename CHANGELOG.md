@@ -4,7 +4,7 @@ This list is built into the app (Settings > What's new) and is posted as each Gi
 players. Each version is `## X.Y.Z - YYYY-MM-DD` with `### New`, `### Improved` and `### Fixed` lists of `- ` items.
 Changes collect under `## Unreleased` (shown only in debug builds) until the release renames it to the version.
 
-## Unreleased
+## 0.6.0 - 2026-11-04
 
 ### New
 - What's new in the settings window: what changed in each version, with a dot on it after an update.
