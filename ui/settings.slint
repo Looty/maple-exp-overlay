@@ -68,6 +68,8 @@ export component SettingsWindow inherits Window {
     /// A newer version that is downloaded and checked ("v0.5.0"): "Relaunch to update" shows.
     in property <string> update-ready;
     in property <string> data-folder;
+    /// The last change couldn't be saved, and why; empty = saved.
+    in property <string> save-error;
 
     /// The Overlay page's preview: the layout's shown items, row by row.
     in property <[PreviewRow]> preview;
@@ -142,6 +144,21 @@ export component SettingsWindow inherits Window {
                     clicked => { root.page = i; }
                 }
                 Rectangle { vertical-stretch: 1; }
+                if root.save-error != "": Rectangle {
+                    border-radius: 10px;
+                    background: #3a2422;
+                    border-width: 1px;
+                    border-color: #5a3330;
+                    VerticalLayout {
+                        padding: 12px;
+                        Text {
+                            text: root.save-error;
+                            color: Colors.bad;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                Rectangle { height: root.save-error != "" ? 8px : 0px; }
                 // a new version is downloaded and checked: one click swaps it in and restarts the overlay
                 if root.update-ready != "": Rectangle {
                     height: 44px;

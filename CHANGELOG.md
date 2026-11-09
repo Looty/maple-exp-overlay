@@ -4,6 +4,17 @@ This list is built into the app (Settings > What's new) and is posted as each Gi
 players. Each version is `## X.Y.Z - YYYY-MM-DD` with `### New`, `### Improved` and `### Fixed` lists of `- ` items.
 Changes collect under `## Unreleased` (shown only in debug builds) until the release renames it to the version.
 
+## Unreleased
+
+### Improved
+- Closing the overlay from its taskbar button (or with Alt+F4) hides it to the tray instead of quitting. Quit is in
+  the tray menu.
+
+### Fixed
+- When Windows doesn't let the app write its settings, the overlay and the settings window now say so as soon as
+  they open, instead of changes quietly doing nothing. (This happens to a copy of the exe on a Desktop that a sandboxing tool has locked down: move the exe
+  to another folder.)
+
 ## 0.6.0 - 2026-11-04
 
 ### New

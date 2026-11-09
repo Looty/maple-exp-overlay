@@ -281,6 +281,29 @@ pub fn path() -> Option<PathBuf> {
     dir().map(|d| d.join("settings.json"))
 }
 
+/// Can files be written in the settings folder? Writes and removes a small test file. (Windows can run the exe so that
+/// it reads the folder fine but can't write to it, e.g. a copy on a Desktop that a sandboxing tool set to low
+/// integrity: every change would then quietly do nothing.)
+pub fn check_writable() -> std::io::Result<()> {
+    check_writable_in(&dir().ok_or_else(|| std::io::Error::other("APPDATA isn't set"))?)
+}
+
+fn check_writable_in(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let probe = dir.join("write-test.tmp");
+    std::fs::write(&probe, b"")?;
+    std::fs::remove_file(&probe)
+}
+
+/// What the settings window says when the settings can't be saved.
+pub fn save_error_text(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("Changes can't be saved: {e}. Try running the app from another folder.")
+    } else {
+        format!("Changes can't be saved: {e}")
+    }
+}
+
 /// When the file last changed, so the overlay can tell the settings window saved something.
 pub fn modified() -> Option<SystemTime> {
     std::fs::metadata(path()?).ok()?.modified().ok()
@@ -294,18 +317,17 @@ impl Settings {
         s
     }
 
-    pub fn save(&self) {
-        let Some(p) = path() else { return };
+    /// Writes the file. The error is for the settings window to show: a write that silently fails looks like
+    /// "nothing happens when I change a setting".
+    pub fn save(&self) -> std::io::Result<()> {
+        let p = path().ok_or_else(|| std::io::Error::other("APPDATA isn't set"))?;
         if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
         // write beside it, then rename: the overlay never reads a half-written file
         let tmp = p.with_extension("json.tmp");
-        if let Ok(t) = serde_json::to_string_pretty(self) {
-            if std::fs::write(&tmp, t).is_ok() {
-                let _ = std::fs::rename(&tmp, &p);
-            }
-        }
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, &p)
     }
 
     /// Any effect switched on.
@@ -407,5 +429,21 @@ mod tests {
         assert_eq!(win.capture, CaptureMode::Window);
         assert_eq!(parse_hex("#ffd455"), Some((255, 212, 85)));
         assert_eq!(parse_hex("ffd45"), None);
+    }
+
+    #[test]
+    fn write_check_leaves_nothing_and_fails_on_a_file() {
+        let dir = std::env::temp_dir().join(format!("mexp-write-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        check_writable_in(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0); // the test file is gone again
+
+        // a "folder" that is really a file can't be written into
+        let file = dir.join("not-a-folder");
+        std::fs::write(&file, b"").unwrap();
+        assert!(check_writable_in(&file).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(save_error_text(&denied).contains("another folder"));
     }
 }
