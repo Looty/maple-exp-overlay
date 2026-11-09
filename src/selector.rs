@@ -100,7 +100,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     } else {
                         s.region = area;
                     }
-                    s.save();
+                    let _ = s.save(); // (a failure shows in the settings window, which saves too)
                 }
                 0
             }

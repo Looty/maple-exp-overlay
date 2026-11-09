@@ -94,6 +94,9 @@ struct App {
     /// Looks in a row that couldn't read the bar.
     misses: u32,
     status: &'static str,
+    /// The settings folder can be written (checked once at start): if not, the overlay says so instead of the
+    /// settings window's changes quietly doing nothing.
+    can_save: bool,
     rows: Vec<Row>,
     font: HFONT,
     dpi: u32,
@@ -712,7 +715,13 @@ impl App {
             self.sync_visibility();
         }
         let short_note = self.note.split('|').next().unwrap_or("");
-        let status = if !self.status.is_empty() && !short_note.is_empty() { short_note } else { self.status };
+        let status = if !self.can_save {
+            "Can't save settings: see Settings"
+        } else if !self.status.is_empty() && !short_note.is_empty() {
+            short_note
+        } else {
+            self.status
+        };
         // close to the next level: the rainbow text shimmers, which keeps a slow timer running
         let has_status = !status.is_empty() || st.paused;
         let near = near_level_up(&self.s, &st);
@@ -1192,7 +1201,7 @@ unsafe fn save_pos(hwnd: HWND) {
     let mut s = Settings::load();
     let shift = with_app(|app| app.status_shift).unwrap_or(0); // (the saved position is the one without the message row)
     s.pos = Some([r.left, r.top + shift]);
-    s.save();
+    let _ = s.save(); // (a failure shows in the settings window, which saves too)
     with_app(|app| {
         app.s.pos = s.pos;
         app.cfg_mtime = config::modified(); // our own write isn't news
@@ -1278,6 +1287,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // the overlay is never minimized: with a taskbar button, Win+D, Win+M or a click on that button would
             // otherwise make it vanish until restarted
             WM_SYSCOMMAND if (wp & 0xFFF0) as u32 == SC_MINIMIZE => 0,
+            // closing it from the taskbar (or Alt+F4) hides it to the tray; Quit is in the menu. (Only the user's close:
+            // a plain WM_CLOSE, which the updater sends to restart it, still quits.)
+            WM_SYSCOMMAND if (wp & 0xFFF0) as u32 == SC_CLOSE && with_app(|a| a.tray_on).unwrap_or(false) => {
+                with_app(|app| {
+                    app.hidden = true;
+                    app.sync_visibility();
+                });
+                0
+            }
             WM_SIZE => {
                 if wp as u32 == SIZE_MINIMIZED {
                     PostMessageW(hwnd, WM_UNMINIMIZE, 0, 0); // (not from inside the minimize itself)
@@ -1436,6 +1454,7 @@ pub fn run() {
                 via: "",
                 misses: 0,
                 status: "starting...",
+                can_save: config::check_writable().is_ok(),
                 rows: Vec::new(),
                 font: null_mut(),
                 dpi: 96,

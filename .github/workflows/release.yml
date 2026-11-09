@@ -1,18 +1,58 @@
 name: Release
 
-# Push a tag like v0.2.1 (it must match the version in Cargo.toml) and this builds the exe, zips it with its licence files,
-# and publishes a GitHub release with a SHA-256 checksum.
+# Builds the exe, zips it with its licence files, and publishes a GitHub release with a SHA-256 checksum, when either:
+# - a push to main brings a Cargo.toml version that has no tag yet (bump the version and date its CHANGELOG entry in
+#   the PR: merging it releases, and the release creates the tag), or
+# - a tag like v0.2.1 is pushed by hand (it must match the version in Cargo.toml).
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: write
 
+# (a merge and a tag pushed right after it must not publish the same version twice at once)
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  # Which version this push releases, if any.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.+)"/\1/')
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            if [ "$tag" != "${{ github.ref_name }}" ]; then
+              echo "::error::Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+            echo "$tag is already released: nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$tag has no tag yet: releasing it"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: windows-latest
     env:
+      TAG: ${{ needs.version.outputs.tag }}
       RUSTFLAGS: >-
         --remap-path-prefix=${{ github.workspace }}=.
         --remap-path-prefix=C:\Users\runneradmin\.cargo=~/.cargo
@@ -20,20 +60,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the tag matches Cargo.toml
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            Write-Error "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
-            exit 1
-          }
-
       # The release notes are this version's entry in CHANGELOG.md (the same text the app shows under What's new).
       - name: Release notes from CHANGELOG.md
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
+          $version = $env:TAG.TrimStart('v')
           $lines = @(Get-Content CHANGELOG.md -Encoding utf8)
           $head = $lines | Select-String -Pattern "^## $([regex]::Escape($version)) - \d{4}-\d{2}-\d{2}\s*$" | Select-Object -First 1
           if (-not $head) { Write-Error "CHANGELOG.md has no '## $version - YYYY-MM-DD' entry (rename Unreleased to it)"; exit 1 }
@@ -59,8 +90,8 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $name = "maple-exp-overlay-$tag-windows-x64"
+          $tag = $env:TAG
+          $name ="maple-exp-overlay-$tag-windows-x64"
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item target/release/maple-exp-overlay.exe, README.md, CHANGELOG.md, LICENSE, NOTICE -Destination $name
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
@@ -89,7 +120,7 @@ jobs:
           Set-Content -Path $key -Value $env:MINISIGN_SECRET_KEY -Encoding ascii
           Copy-Item target/release/maple-exp-overlay.exe maple-exp-overlay.exe
           try {
-            & $minisign -S -s $key -m maple-exp-overlay.exe -t "maple-exp-overlay ${{ github.ref_name }}"
+            & $minisign -S -s $key -m maple-exp-overlay.exe -t "maple-exp-overlay $env:TAG"
             $code = $LASTEXITCODE
           } finally {
             Remove-Item $key -ErrorAction SilentlyContinue
@@ -100,6 +131,9 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          # (after a merge the tag doesn't exist yet: the release creates it on the merged commit)
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256

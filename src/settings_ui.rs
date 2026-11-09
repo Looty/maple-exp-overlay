@@ -67,7 +67,17 @@ fn edit(settings: &Shared, f: impl FnOnce(&mut Settings)) {
     *s = Settings::load();
     f(&mut s);
     s.clamp();
-    s.save();
+    let text = s.save().err().map(|e| config::save_error_text(&e)).unwrap_or_default();
+    WINDOW.with(|w| {
+        if let Some(ui) = w.borrow().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_save_error(text.into());
+        }
+    });
+}
+
+thread_local! {
+    /// The window, so `edit` can say when the settings couldn't be saved.
+    static WINDOW: RefCell<Option<slint::Weak<SettingsWindow>>> = const { RefCell::new(None) };
 }
 
 fn to_change_release(r: &maple_exp::changelog::Release) -> ChangeRelease {
@@ -546,6 +556,7 @@ pub fn run() {
         return;
     }
     let ui = SettingsWindow::new().expect("settings window");
+    WINDOW.with(|w| *w.borrow_mut() = Some(ui.as_weak()));
     let settings: Shared = Rc::new(RefCell::new(Settings::load()));
     let fonts = installed_fonts();
     let last_pos = Rc::new(Cell::new((0, 0)));
@@ -588,6 +599,10 @@ pub fn run() {
         ui.set_page(3); // (Capture)
     }
     ui.set_data_folder(config::dir().map(|d| d.display().to_string()).unwrap_or_default().into());
+    // say it now, not only after the first change is lost
+    if let Err(e) = config::check_writable() {
+        ui.set_save_error(config::save_error_text(&e).into());
+    }
     refresh();
 
     // any change in the window is saved at once; the overlay picks it up on its next tick
